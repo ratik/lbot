@@ -1,14 +1,14 @@
 symbols = ["BTCUSDT"]
 online_bucket_ms = 250
 warmup_seconds = 120
-venue_signal_threshold = 5.0
-min_directional_core = 1.5
-max_stress_amplifier = 3.0
+venue_signal_threshold = 6.0
+min_directional_core = 2.5
+max_stress_amplifier = 2.5
 min_return_bps = 1.0
 long_return_z_gate = 0.5
-long_volume_z_gate = 0.5
+long_volume_z_gate = 1.0
 short_return_z_gate = 0.5
-short_volume_z_gate = 0.5
+short_volume_z_gate = 1.0
 sqlite_path = "data/liquidation_watcher.sqlite"
 log_level = "info"
 
@@ -44,7 +44,7 @@ return_5s = 1.1
 signed_volume_1s = 1.0
 signed_volume_5s = 0.9
 trade_burst = 0.20
-spread_widening = 0.15
+spread_widening = 0.05
 volatility_burst = 0.15
 
 [score_weights.market_venue_weights]
@@ -54,8 +54,8 @@ okx = 0.8
 dydx = 0.3
 
 [thresholds]
-venue_long_threshold = 5.0
-venue_short_threshold = 5.0
+venue_long_threshold = 6.0
+venue_short_threshold = 6.0
 market_long_threshold = 4.5
 market_short_threshold = 4.5
 venue_rearm_ratio = 0.7
@@ -63,7 +63,7 @@ market_rearm_ratio = 0.7
 market_min_confirmations = 2
 
 [cooldowns]
-venue_event_s = 10
+venue_event_s = 30
 market_event_s = 30
 
 [evaluation]

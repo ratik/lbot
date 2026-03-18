@@ -107,6 +107,17 @@ impl RuntimeStats {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct SummarySnapshot {
+    evaluations: u64,
+    venue_signals: u64,
+    market_signals: u64,
+    blocked_warmup: u64,
+    blocked_gate: u64,
+    blocked_both_failed: u64,
+    blocked_dual_pass: u64,
+}
+
 pub async fn run(config: AppConfig) -> Result<()> {
     let config = Arc::new(config);
     let persistence = PersistenceHandle::new(&config.sqlite_path)?;
@@ -121,6 +132,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let mut block_counters = BlockCounters::default();
     let mut runtime_stats = RuntimeStats::default();
     let mut last_summary_ms = now_ms();
+    let mut last_summary_snapshot = SummarySnapshot::default();
 
     info!(
         symbols = ?config.symbols,
@@ -252,6 +264,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
                 &venue_states,
                 &config,
                 summary_now_ms,
+                &mut last_summary_snapshot,
             );
             last_summary_ms = summary_now_ms;
         }
@@ -283,44 +296,7 @@ fn emit_venue_signal_if_needed(
         >= config.directional_gates.short_return_z_gate
         && features.signed_volume_1s_z >= config.directional_gates.short_volume_z_gate
         && min_return_check;
-    let feature_blob = serde_json::json!({
-        "bucket_time_ms": features.bucket_time_ms,
-        "warmup": {
-            "eligible": warmup.eligible,
-            "age_ms": warmup.age_ms,
-            "min_age_ms": warmup.min_age_ms,
-            "has_window_coverage": warmup.has_window_coverage,
-        },
-        "gates": {
-            "long_directional_gate": long_directional_gate,
-            "short_directional_gate": short_directional_gate,
-            "long_return_z_gate": config.directional_gates.long_return_z_gate,
-            "long_volume_z_gate": config.directional_gates.long_volume_z_gate,
-            "short_return_z_gate": config.directional_gates.short_return_z_gate,
-            "short_volume_z_gate": config.directional_gates.short_volume_z_gate,
-            "min_return_bps": config.min_return_bps,
-            "min_return_check": min_return_check,
-        },
-        "scores": {
-            "directional_core_long": snapshot.directional_core_long,
-            "directional_core_short": snapshot.directional_core_short,
-            "stress_long": snapshot.stress_long,
-            "stress_short": snapshot.stress_short,
-            "min_directional_core": config.min_directional_core,
-            "min_directional_core_pass_long": snapshot.min_directional_core_pass_long,
-            "min_directional_core_pass_short": snapshot.min_directional_core_pass_short,
-            "long_score": snapshot.long_score,
-            "short_score": snapshot.short_score,
-        },
-        "features": features,
-    });
-    let feature_json = match serde_json::to_string(&feature_blob) {
-        Ok(json) => json,
-        Err(err) => {
-            warn!(error = %err, "failed serializing venue features");
-            return;
-        }
-    };
+    let spread_shock = features.spread_bps_zscore >= 5.0;
 
     if !warmup.eligible {
         block_counters.note(
@@ -375,6 +351,65 @@ fn emit_venue_signal_if_needed(
 
     let Some((direction, score)) = selected else {
         return;
+    };
+    let emitted_directional_core = match direction {
+        Direction::Long => snapshot.directional_core_long,
+        Direction::Short => snapshot.directional_core_short,
+    };
+    let strong_directional_core = emitted_directional_core >= config.min_directional_core;
+    let volume_margin = 0.25;
+    let volume_confirmed = match direction {
+        Direction::Long => {
+            features.signed_volume_1s_z
+                <= -(config.directional_gates.long_volume_z_gate + volume_margin)
+        }
+        Direction::Short => {
+            features.signed_volume_1s_z
+                >= config.directional_gates.short_volume_z_gate + volume_margin
+        }
+    };
+    let feature_json = match serde_json::to_string(&serde_json::json!({
+        "bucket_time_ms": features.bucket_time_ms,
+        "warmup": {
+            "eligible": warmup.eligible,
+            "age_ms": warmup.age_ms,
+            "min_age_ms": warmup.min_age_ms,
+            "has_window_coverage": warmup.has_window_coverage,
+        },
+        "gates": {
+            "long_directional_gate": long_directional_gate,
+            "short_directional_gate": short_directional_gate,
+            "long_return_z_gate": config.directional_gates.long_return_z_gate,
+            "long_volume_z_gate": config.directional_gates.long_volume_z_gate,
+            "short_return_z_gate": config.directional_gates.short_return_z_gate,
+            "short_volume_z_gate": config.directional_gates.short_volume_z_gate,
+            "min_return_bps": config.min_return_bps,
+            "min_return_check": min_return_check,
+        },
+        "scores": {
+            "directional_core_long": snapshot.directional_core_long,
+            "directional_core_short": snapshot.directional_core_short,
+            "stress_long": snapshot.stress_long,
+            "stress_short": snapshot.stress_short,
+            "min_directional_core": config.min_directional_core,
+            "min_directional_core_pass_long": snapshot.min_directional_core_pass_long,
+            "min_directional_core_pass_short": snapshot.min_directional_core_pass_short,
+            "long_score": snapshot.long_score,
+            "short_score": snapshot.short_score,
+        },
+        "diagnostics": {
+            "spread_shock": spread_shock,
+            "strong_directional_core": strong_directional_core,
+            "volume_confirmed": volume_confirmed,
+            "emitted_direction": direction.as_str(),
+        },
+        "features": features,
+    })) {
+        Ok(json) => json,
+        Err(err) => {
+            warn!(error = %err, "failed serializing venue features");
+            return;
+        }
     };
 
     let threshold = match direction {
@@ -448,6 +483,9 @@ fn emit_venue_signal_if_needed(
             min_directional_core = config.min_directional_core,
             min_directional_core_pass_long = snapshot.min_directional_core_pass_long,
             min_directional_core_pass_short = snapshot.min_directional_core_pass_short,
+            spread_shock,
+            strong_directional_core,
+            volume_confirmed,
             "venue signal emitted"
         );
 
@@ -602,6 +640,7 @@ fn log_runtime_summary(
     venue_states: &HashMap<(String, Venue), RollingState>,
     config: &AppConfig,
     now_ms: i64,
+    last_summary_snapshot: &mut SummarySnapshot,
 ) {
     let active_states = venue_states.len();
     let eligible_states = venue_states
@@ -618,17 +657,55 @@ fn log_runtime_summary(
             .collect::<Vec<_>>()
             .join(",")
     };
+    let current_snapshot = SummarySnapshot {
+        evaluations: runtime_stats.evaluations,
+        venue_signals: runtime_stats.venue_signals,
+        market_signals: runtime_stats.market_signals,
+        blocked_warmup: block_counters.warmup,
+        blocked_gate: block_counters.directional_gate,
+        blocked_both_failed: block_counters.both_failed,
+        blocked_dual_pass: block_counters.dual_pass_stronger_only,
+    };
+    let evaluations_interval = current_snapshot.evaluations - last_summary_snapshot.evaluations;
+    let venue_signals_interval =
+        current_snapshot.venue_signals - last_summary_snapshot.venue_signals;
+    let market_signals_interval =
+        current_snapshot.market_signals - last_summary_snapshot.market_signals;
+    let blocked_warmup_interval =
+        current_snapshot.blocked_warmup - last_summary_snapshot.blocked_warmup;
+    let blocked_gate_interval = current_snapshot.blocked_gate - last_summary_snapshot.blocked_gate;
+    let blocked_both_failed_interval =
+        current_snapshot.blocked_both_failed - last_summary_snapshot.blocked_both_failed;
+    let blocked_dual_pass_interval =
+        current_snapshot.blocked_dual_pass - last_summary_snapshot.blocked_dual_pass;
+    *last_summary_snapshot = current_snapshot;
 
     info!(
         evaluations = runtime_stats.evaluations,
+        evaluations_interval,
         venue_signals = runtime_stats.venue_signals,
+        venue_signals_interval,
         market_signals = runtime_stats.market_signals,
+        market_signals_interval,
         blocked_warmup = block_counters.warmup,
+        blocked_warmup_interval,
         blocked_gate = block_counters.directional_gate,
+        blocked_gate_interval,
         blocked_both_failed = block_counters.both_failed,
+        blocked_both_failed_interval,
         blocked_dual_pass = block_counters.dual_pass_stronger_only,
+        blocked_dual_pass_interval,
         active_states,
         eligible_states,
+        venue_long_threshold = config.thresholds.venue_long_threshold,
+        venue_short_threshold = config.thresholds.venue_short_threshold,
+        min_directional_core = config.min_directional_core,
+        long_return_z_gate = config.directional_gates.long_return_z_gate,
+        long_volume_z_gate = config.directional_gates.long_volume_z_gate,
+        short_return_z_gate = config.directional_gates.short_return_z_gate,
+        short_volume_z_gate = config.directional_gates.short_volume_z_gate,
+        spread_widening_weight = config.score_weights.spread_widening,
+        venue_event_s = config.cooldowns.venue_event_s,
         per_state = %per_state,
         "runtime summary"
     );

@@ -148,11 +148,11 @@ impl Default for AppConfig {
 pub struct DirectionalGateConfig {
     #[serde(default = "default_gate_z")]
     pub long_return_z_gate: f64,
-    #[serde(default = "default_gate_z")]
+    #[serde(default = "default_volume_gate_z")]
     pub long_volume_z_gate: f64,
     #[serde(default = "default_gate_z")]
     pub short_return_z_gate: f64,
-    #[serde(default = "default_gate_z")]
+    #[serde(default = "default_volume_gate_z")]
     pub short_volume_z_gate: f64,
 }
 
@@ -160,9 +160,9 @@ impl Default for DirectionalGateConfig {
     fn default() -> Self {
         Self {
             long_return_z_gate: default_gate_z(),
-            long_volume_z_gate: default_gate_z(),
+            long_volume_z_gate: default_volume_gate_z(),
             short_return_z_gate: default_gate_z(),
-            short_volume_z_gate: default_gate_z(),
+            short_volume_z_gate: default_volume_gate_z(),
         }
     }
 }
@@ -187,11 +187,11 @@ impl Default for VenueConfig {
                 url: "wss://fstream.binance.com/stream".to_string(),
             },
             bybit: VenueSettings {
-                enabled: true,
+                enabled: false,
                 url: "wss://stream.bybit.com/v5/public/linear".to_string(),
             },
             okx: VenueSettings {
-                enabled: true,
+                enabled: false,
                 url: "wss://ws.okx.com:8443/ws/v5/public".to_string(),
             },
             dydx: VenueSettings {
@@ -372,11 +372,7 @@ fn split_csv(value: &str) -> Vec<String> {
 }
 
 fn default_symbols() -> Vec<String> {
-    vec![
-        "BTCUSDT".to_string(),
-        "ETHUSDT".to_string(),
-        "SOLUSDT".to_string(),
-    ]
+    vec!["BTCUSDT".to_string()]
 }
 
 fn default_venue_weights() -> HashMap<String, f64> {
@@ -413,11 +409,11 @@ fn default_warmup_seconds() -> u64 {
 }
 
 fn default_min_directional_core() -> f64 {
-    1.5
+    2.5
 }
 
 fn default_max_stress_amplifier() -> f64 {
-    3.0
+    2.5
 }
 
 fn default_min_return_bps() -> f64 {
@@ -426,6 +422,10 @@ fn default_min_return_bps() -> f64 {
 
 fn default_gate_z() -> f64 {
     0.5
+}
+
+fn default_volume_gate_z() -> f64 {
+    1.0
 }
 
 fn default_1s() -> u64 {
@@ -468,14 +468,14 @@ fn default_trade_burst_weight() -> f64 {
     0.20
 }
 fn default_spread_widening_weight() -> f64 {
-    0.15
+    0.05
 }
 fn default_volatility_burst_weight() -> f64 {
     0.15
 }
 
 fn default_venue_threshold() -> f64 {
-    5.0
+    6.0
 }
 
 fn default_market_threshold() -> f64 {
@@ -491,7 +491,7 @@ fn default_market_confirmations() -> usize {
 }
 
 fn default_venue_cooldown() -> u64 {
-    10
+    30
 }
 
 fn default_market_cooldown() -> u64 {

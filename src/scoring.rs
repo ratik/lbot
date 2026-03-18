@@ -51,7 +51,7 @@ pub fn compute_venue_scores(
         .max(features.signed_volume_1s_z.max(0.0))
         .max(features.signed_volume_5s_z.max(0.0))
         .max(0.0);
-    let spread_widening_z = features.spread_bps_zscore.max(0.0);
+    let spread_widening_z = features.spread_bps_zscore.max(0.0).min(5.0);
     let volatility_burst_z = features
         .realized_vol_5s_z
         .max(features.realized_vol_15s_z)
