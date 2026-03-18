@@ -1,0 +1,76 @@
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+online_bucket_ms = 250
+warmup_seconds = 120
+venue_signal_threshold = 5.0
+min_directional_core = 1.5
+max_stress_amplifier = 3.0
+min_return_bps = 1.0
+long_return_z_gate = 0.5
+long_volume_z_gate = 0.5
+short_return_z_gate = 0.5
+short_volume_z_gate = 0.5
+sqlite_path = "data/liquidation_watcher.sqlite"
+log_level = "info"
+
+[venues.binance]
+enabled = true
+url = "wss://fstream.binance.com/stream"
+
+[venues.bybit]
+enabled = true
+url = "wss://stream.bybit.com/v5/public/linear"
+
+[venues.okx]
+enabled = true
+url = "wss://ws.okx.com:8443/ws/v5/public"
+
+[venues.dydx]
+enabled = false
+url = "wss://indexer.dydx.trade/v4/ws"
+
+[feature_windows]
+return_1s = 1
+return_5s = 5
+return_15s = 15
+return_30s = 30
+state_retention_s = 600
+
+[zscore_windows]
+seconds = 60
+
+[score_weights]
+return_1s = 1.2
+return_5s = 1.1
+signed_volume_1s = 1.0
+signed_volume_5s = 0.9
+trade_burst = 0.20
+spread_widening = 0.15
+volatility_burst = 0.15
+
+[score_weights.market_venue_weights]
+binance = 1.0
+bybit = 0.8
+okx = 0.8
+dydx = 0.3
+
+[thresholds]
+venue_long_threshold = 5.0
+venue_short_threshold = 5.0
+market_long_threshold = 4.5
+market_short_threshold = 4.5
+venue_rearm_ratio = 0.7
+market_rearm_ratio = 0.7
+market_min_confirmations = 2
+
+[cooldowns]
+venue_event_s = 10
+market_event_s = 30
+
+[evaluation]
+horizons_s = [10, 30, 60, 120]
+default_success_threshold_bps = 20.0
+
+[evaluation.success_thresholds_bps]
+BTCUSDT = 20.0
+ETHUSDT = 25.0
+SOLUSDT = 35.0
