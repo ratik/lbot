@@ -184,6 +184,10 @@ pub async fn run(config: AppConfig) -> Result<()> {
         let symbol = key.0.clone();
         let venue = key.1;
 
+        if !config.venue_analysis_enabled(venue) {
+            continue;
+        }
+
         let quote_recv_time_ms = match &event {
             MarketEvent::Quote(tick) => Some(tick.recv_time_ms),
             _ => None,
@@ -517,7 +521,7 @@ fn emit_venue_signal_if_needed(
         }
         runtime_stats.note_venue_signal(&event.symbol, event.venue);
 
-        info!(
+        warn!(
             event = if direction == Direction::Long { "VENUE_LONG_LIQ_RISK" } else { "VENUE_SHORT_LIQ_RISK" },
             event_id = %event.event_id,
             symbol = %event.symbol,

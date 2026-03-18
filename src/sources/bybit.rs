@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::AppConfig,
-    types::{MarketEvent, QuoteTick, TradeTick, Venue},
+    types::{Direction, LiquidationTick, MarketEvent, QuoteTick, TradeTick, Venue},
 };
 
 pub fn spawn(config: &AppConfig, tx: mpsc::Sender<MarketEvent>) -> JoinHandle<()> {
@@ -33,7 +33,13 @@ async fn run_once(
     let (mut ws, _) = connect_async(url).await?;
     let args = symbols
         .iter()
-        .flat_map(|symbol| [format!("publicTrade.{symbol}"), format!("tickers.{symbol}")])
+        .flat_map(|symbol| {
+            [
+                format!("publicTrade.{symbol}"),
+                format!("tickers.{symbol}"),
+                format!("allLiquidation.{symbol}"),
+            ]
+        })
         .collect::<Vec<_>>();
     ws.send(Message::Text(
         json!({ "op": "subscribe", "args": args })
@@ -78,6 +84,19 @@ async fn handle_text(text: &str, tx: &mpsc::Sender<MarketEvent>) -> anyhow::Resu
                 tx.send(MarketEvent::Trade(tick)).await?;
             }
         }
+    } else if topic.starts_with("allLiquidation.") {
+        if let Some(items) = value.get("data").and_then(Value::as_array) {
+            for item in items {
+                match parse_liquidation(item, recv_time_ms) {
+                    Ok(tick) => {
+                        tx.send(MarketEvent::Liquidation(tick)).await?;
+                    }
+                    Err(err) => {
+                        warn!(error = %err, topic, "failed to parse bybit liquidation payload");
+                    }
+                }
+            }
+        }
     } else if topic.starts_with("tickers.") {
         if let Some(item) = value.get("data").and_then(|data| {
             if data.is_array() {
@@ -102,6 +121,40 @@ async fn handle_text(text: &str, tx: &mpsc::Sender<MarketEvent>) -> anyhow::Resu
         }
     }
     Ok(())
+}
+
+fn parse_liquidation(item: &Value, recv_time_ms: i64) -> anyhow::Result<LiquidationTick> {
+    let side_raw = item
+        .get("S")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing liquidation side"))?;
+    let side = match side_raw {
+        "Sell" => Direction::Long,
+        "Buy" => Direction::Short,
+        other => return Err(anyhow::anyhow!("unexpected liquidation side {other}")),
+    };
+    let symbol = item
+        .get("s")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing liquidation symbol"))?;
+    let price = parse_f64(&item["p"]);
+    let quantity = parse_f64(&item["v"]);
+    let event_time_ms = item["T"].as_i64().unwrap_or(recv_time_ms);
+    if price <= 0.0 || quantity <= 0.0 {
+        return Err(anyhow::anyhow!(
+            "invalid liquidation price/quantity: price={price}, quantity={quantity}"
+        ));
+    }
+
+    Ok(LiquidationTick {
+        symbol: symbol.to_string(),
+        venue: Venue::Bybit,
+        recv_time_ms,
+        event_time_ms,
+        side,
+        price,
+        quantity,
+    })
 }
 
 fn parse_f64(value: &Value) -> f64 {

@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::{
     config::AppConfig,
@@ -92,7 +92,7 @@ async fn handle_text(text: &str, tx: &mpsc::Sender<MarketEvent>) -> anyhow::Resu
     } else if stream.ends_with("@forceOrder") {
         match parse_force_order(&data, recv_time_ms) {
             Ok(Some(tick)) => {
-                debug!(
+                info!(
                     symbol = %tick.symbol,
                     side = tick.side.as_str(),
                     price = tick.price,

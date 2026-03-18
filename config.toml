@@ -2,7 +2,7 @@ symbols = ["BTCUSDT"]
 online_bucket_ms = 250
 warmup_seconds = 120
 venue_signal_threshold = 6.0
-min_directional_core = 4.0
+min_directional_core = 3.0
 max_stress_amplifier = 2.5
 min_return_bps = 2.0
 long_return_z_gate = 0.5
@@ -14,18 +14,22 @@ log_level = "info"
 
 [venues.binance]
 enabled = true
+analysis_enabled = true
 url = "wss://fstream.binance.com/stream"
 
 [venues.bybit]
-enabled = false
+enabled = true
+analysis_enabled = false
 url = "wss://stream.bybit.com/v5/public/linear"
 
 [venues.okx]
 enabled = false
+analysis_enabled = true
 url = "wss://ws.okx.com:8443/ws/v5/public"
 
 [venues.dydx]
 enabled = false
+analysis_enabled = true
 url = "wss://indexer.dydx.trade/v4/ws"
 
 [feature_windows]

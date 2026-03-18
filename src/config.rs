@@ -118,6 +118,15 @@ impl AppConfig {
             .copied()
             .unwrap_or(self.evaluation.default_success_threshold_bps)
     }
+
+    pub fn venue_analysis_enabled(&self, venue: Venue) -> bool {
+        match venue {
+            Venue::Binance => self.venues.binance.analysis_enabled,
+            Venue::Bybit => self.venues.bybit.analysis_enabled,
+            Venue::Okx => self.venues.okx.analysis_enabled,
+            Venue::Dydx => self.venues.dydx.analysis_enabled,
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -184,18 +193,22 @@ impl Default for VenueConfig {
         Self {
             binance: VenueSettings {
                 enabled: true,
+                analysis_enabled: true,
                 url: "wss://fstream.binance.com/stream".to_string(),
             },
             bybit: VenueSettings {
                 enabled: false,
+                analysis_enabled: true,
                 url: "wss://stream.bybit.com/v5/public/linear".to_string(),
             },
             okx: VenueSettings {
                 enabled: false,
+                analysis_enabled: true,
                 url: "wss://ws.okx.com:8443/ws/v5/public".to_string(),
             },
             dydx: VenueSettings {
                 enabled: false,
+                analysis_enabled: true,
                 url: "wss://indexer.dydx.trade/v4/ws".to_string(),
             },
         }
@@ -206,6 +219,8 @@ impl Default for VenueConfig {
 pub struct VenueSettings {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_enabled")]
+    pub analysis_enabled: bool,
     pub url: String,
 }
 
@@ -213,6 +228,7 @@ impl Default for VenueSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            analysis_enabled: true,
             url: String::new(),
         }
     }
