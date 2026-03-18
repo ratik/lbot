@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -41,8 +41,8 @@ impl BlockCounters {
             BlockKind::DualPassStrongerOnly => &mut self.dual_pass_stronger_only,
         };
         *counter += 1;
-        if *counter <= 5 || *counter % 100 == 0 {
-            info!(
+        if *counter <= 3 || *counter % 10_000 == 0 {
+            debug!(
                 block_kind = kind.as_str(),
                 count = *counter,
                 symbol,
@@ -81,6 +81,32 @@ struct WarmupStatus {
     has_window_coverage: bool,
 }
 
+#[derive(Debug, Default)]
+struct RuntimeStats {
+    evaluations: u64,
+    venue_signals: u64,
+    market_signals: u64,
+    venue_signal_counts: HashMap<(String, Venue), u64>,
+}
+
+impl RuntimeStats {
+    fn note_evaluation(&mut self) {
+        self.evaluations += 1;
+    }
+
+    fn note_venue_signal(&mut self, symbol: &str, venue: Venue) {
+        self.venue_signals += 1;
+        *self
+            .venue_signal_counts
+            .entry((symbol.to_string(), venue))
+            .or_insert(0) += 1;
+    }
+
+    fn note_market_signal(&mut self) {
+        self.market_signals += 1;
+    }
+}
+
 pub async fn run(config: AppConfig) -> Result<()> {
     let config = Arc::new(config);
     let persistence = PersistenceHandle::new(&config.sqlite_path)?;
@@ -93,6 +119,8 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let mut latest_scores: HashMap<(String, Venue), VenueScoreSnapshot> = HashMap::new();
     let mut signal_registry = SignalRegistry::default();
     let mut block_counters = BlockCounters::default();
+    let mut runtime_stats = RuntimeStats::default();
+    let mut last_summary_ms = now_ms();
 
     info!(
         symbols = ?config.symbols,
@@ -138,6 +166,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
         }
 
         if let Some(features) = features {
+            runtime_stats.note_evaluation();
             let scores = compute_venue_scores(
                 &features,
                 &config.score_weights,
@@ -183,6 +212,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
                 &market_history,
                 &mut signal_registry,
                 &mut block_counters,
+                &mut runtime_stats,
                 &snapshot,
                 &features,
                 warmup,
@@ -207,10 +237,23 @@ pub async fn run(config: AppConfig) -> Result<()> {
                 &persistence,
                 &market_history,
                 &mut signal_registry,
+                &mut runtime_stats,
                 &symbol_snapshots,
                 &market,
                 &features,
             );
+        }
+
+        let summary_now_ms = now_ms();
+        if summary_now_ms - last_summary_ms >= 60_000 {
+            log_runtime_summary(
+                &runtime_stats,
+                &block_counters,
+                &venue_states,
+                &config,
+                summary_now_ms,
+            );
+            last_summary_ms = summary_now_ms;
         }
     }
 
@@ -223,6 +266,7 @@ fn emit_venue_signal_if_needed(
     market_history: &SharedMarketHistory,
     signal_registry: &mut SignalRegistry,
     block_counters: &mut BlockCounters,
+    runtime_stats: &mut RuntimeStats,
     snapshot: &VenueScoreSnapshot,
     features: &FeatureSnapshot,
     warmup: WarmupStatus,
@@ -368,6 +412,7 @@ fn emit_venue_signal_if_needed(
             error!(error = %err, event_id = %event.event_id, "failed to persist venue signal");
             return;
         }
+        runtime_stats.note_venue_signal(&event.symbol, event.venue);
 
         info!(
             event = if direction == Direction::Long { "VENUE_LONG_LIQ_RISK" } else { "VENUE_SHORT_LIQ_RISK" },
@@ -426,6 +471,7 @@ fn emit_market_signal_if_needed(
     persistence: &PersistenceHandle,
     market_history: &SharedMarketHistory,
     signal_registry: &mut SignalRegistry,
+    runtime_stats: &mut RuntimeStats,
     symbol_snapshots: &[VenueScoreSnapshot],
     market: &crate::scoring::MarketConfirmation,
     features: &FeatureSnapshot,
@@ -501,6 +547,7 @@ fn emit_market_signal_if_needed(
                 error!(error = %err, event_id = %event.event_id, "failed to persist market signal");
                 continue;
             }
+            runtime_stats.note_market_signal();
 
             info!(
                 event = if direction == Direction::Long { "MARKET_LONG_LIQ_RISK" } else { "MARKET_SHORT_LIQ_RISK" },
@@ -547,6 +594,44 @@ fn warmup_status(config: &AppConfig, state: &RollingState, now_ms: i64) -> Warmu
         min_age_ms,
         has_window_coverage,
     }
+}
+
+fn log_runtime_summary(
+    runtime_stats: &RuntimeStats,
+    block_counters: &BlockCounters,
+    venue_states: &HashMap<(String, Venue), RollingState>,
+    config: &AppConfig,
+    now_ms: i64,
+) {
+    let active_states = venue_states.len();
+    let eligible_states = venue_states
+        .values()
+        .filter(|state| warmup_status(config, state, now_ms).eligible)
+        .count();
+    let per_state = if runtime_stats.venue_signal_counts.is_empty() {
+        "none".to_string()
+    } else {
+        runtime_stats
+            .venue_signal_counts
+            .iter()
+            .map(|((symbol, venue), count)| format!("{symbol}:{}={count}", venue.as_str()))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+
+    info!(
+        evaluations = runtime_stats.evaluations,
+        venue_signals = runtime_stats.venue_signals,
+        market_signals = runtime_stats.market_signals,
+        blocked_warmup = block_counters.warmup,
+        blocked_gate = block_counters.directional_gate,
+        blocked_both_failed = block_counters.both_failed,
+        blocked_dual_pass = block_counters.dual_pass_stronger_only,
+        active_states,
+        eligible_states,
+        per_state = %per_state,
+        "runtime summary"
+    );
 }
 
 fn blended_market_price(

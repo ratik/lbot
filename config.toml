@@ -1,4 +1,4 @@
-symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+symbols = ["BTCUSDT"]
 online_bucket_ms = 250
 warmup_seconds = 120
 venue_signal_threshold = 5.0
@@ -17,11 +17,11 @@ enabled = true
 url = "wss://fstream.binance.com/stream"
 
 [venues.bybit]
-enabled = true
+enabled = false
 url = "wss://stream.bybit.com/v5/public/linear"
 
 [venues.okx]
-enabled = true
+enabled = false
 url = "wss://ws.okx.com:8443/ws/v5/public"
 
 [venues.dydx]

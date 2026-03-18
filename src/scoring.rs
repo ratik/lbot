@@ -128,11 +128,12 @@ pub fn compute_market_confirmation(
             .unwrap_or(1.0);
         long_score += snapshot.long_score * weight;
         short_score += snapshot.short_score * weight;
-        if snapshot.long_score >= venue_threshold_long {
+        if snapshot.min_directional_core_pass_long && snapshot.long_score >= venue_threshold_long {
             confirming_long.push(snapshot.venue);
             long_times.push((snapshot.event_time_ms, snapshot.venue));
         }
-        if snapshot.short_score >= venue_threshold_short {
+        if snapshot.min_directional_core_pass_short && snapshot.short_score >= venue_threshold_short
+        {
             confirming_short.push(snapshot.venue);
             short_times.push((snapshot.event_time_ms, snapshot.venue));
         }
