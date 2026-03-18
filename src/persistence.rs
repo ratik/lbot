@@ -9,12 +9,15 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use tracing::error;
 
-use crate::types::{HeartbeatEvent, MarketSignalEvent, OutcomeCheckEvent, VenueSignalEvent};
+use crate::types::{
+    HeartbeatEvent, LiquidationTick, MarketSignalEvent, OutcomeCheckEvent, VenueSignalEvent,
+};
 
 #[derive(Debug)]
 enum PersistCommand {
     VenueSignal(VenueSignalEvent),
     MarketSignal(MarketSignalEvent),
+    Liquidation(LiquidationTick),
     Outcome(OutcomeCheckEvent),
     Heartbeat(HeartbeatEvent),
 }
@@ -56,6 +59,12 @@ impl PersistenceHandle {
             .context("market signal send failed")
     }
 
+    pub fn send_liquidation_event(&self, event: LiquidationTick) -> Result<()> {
+        self.tx
+            .send(PersistCommand::Liquidation(event))
+            .context("liquidation send failed")
+    }
+
     pub fn send_outcome(&self, event: OutcomeCheckEvent) -> Result<()> {
         self.tx
             .send(PersistCommand::Outcome(event))
@@ -79,6 +88,7 @@ fn run_worker(path: &str, rx: Receiver<PersistCommand>) -> Result<()> {
         match cmd {
             PersistCommand::VenueSignal(event) => insert_venue_signal(&conn, &event)?,
             PersistCommand::MarketSignal(event) => insert_market_signal(&conn, &event)?,
+            PersistCommand::Liquidation(event) => insert_liquidation_event(&conn, &event)?,
             PersistCommand::Outcome(event) => insert_outcome(&conn, &event)?,
             PersistCommand::Heartbeat(event) => insert_heartbeat(&conn, &event)?,
         }
@@ -124,6 +134,23 @@ fn init_schema(conn: &Connection) -> Result<()> {
             success_flag INTEGER NOT NULL,
             PRIMARY KEY (event_id, horizon_s)
         );
+
+        CREATE TABLE IF NOT EXISTS liquidation_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            venue TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            recv_time_ms INTEGER NOT NULL,
+            event_time_ms INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            price REAL NOT NULL,
+            quantity REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_liquidation_events_symbol_time
+            ON liquidation_events(symbol, event_time_ms);
+
+        CREATE INDEX IF NOT EXISTS idx_liquidation_events_venue_symbol_time
+            ON liquidation_events(venue, symbol, event_time_ms);
 
         CREATE TABLE IF NOT EXISTS service_heartbeats (
             service_time INTEGER NOT NULL,
@@ -189,6 +216,24 @@ fn insert_outcome(conn: &Connection, event: &OutcomeCheckEvent) -> Result<()> {
             event.max_adverse_bps,
             event.realized_vol_after,
             event.success_flag as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_liquidation_event(conn: &Connection, event: &LiquidationTick) -> Result<()> {
+    conn.execute(
+        "INSERT INTO liquidation_events
+        (venue, symbol, recv_time_ms, event_time_ms, side, price, quantity)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            event.venue.as_str(),
+            event.symbol,
+            event.recv_time_ms,
+            event.event_time_ms,
+            event.side.as_str(),
+            event.price,
+            event.quantity,
         ],
     )?;
     Ok(())

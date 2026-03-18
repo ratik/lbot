@@ -79,10 +79,22 @@ impl QuoteTick {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiquidationTick {
+    pub symbol: String,
+    pub venue: Venue,
+    pub recv_time_ms: i64,
+    pub event_time_ms: i64,
+    pub side: Direction,
+    pub price: f64,
+    pub quantity: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MarketEvent {
     Trade(TradeTick),
     Quote(QuoteTick),
+    Liquidation(LiquidationTick),
 }
 
 impl MarketEvent {
@@ -90,6 +102,7 @@ impl MarketEvent {
         match self {
             Self::Trade(tick) => &tick.symbol,
             Self::Quote(tick) => &tick.symbol,
+            Self::Liquidation(tick) => &tick.symbol,
         }
     }
 
@@ -97,6 +110,7 @@ impl MarketEvent {
         match self {
             Self::Trade(tick) => tick.venue,
             Self::Quote(tick) => tick.venue,
+            Self::Liquidation(tick) => tick.venue,
         }
     }
 }

@@ -4,11 +4,11 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     config::AppConfig,
-    types::{MarketEvent, QuoteTick, TradeTick, Venue},
+    types::{Direction, LiquidationTick, MarketEvent, QuoteTick, TradeTick, Venue},
 };
 
 pub fn spawn(config: &AppConfig, tx: mpsc::Sender<MarketEvent>) -> JoinHandle<()> {
@@ -19,7 +19,11 @@ pub fn spawn(config: &AppConfig, tx: mpsc::Sender<MarketEvent>) -> JoinHandle<()
             .iter()
             .flat_map(|symbol| {
                 let lower = symbol.to_lowercase();
-                [format!("{lower}@trade"), format!("{lower}@bookTicker")]
+                [
+                    format!("{lower}@trade"),
+                    format!("{lower}@bookTicker"),
+                    format!("{lower}@forceOrder"),
+                ]
             })
             .collect::<Vec<_>>()
             .join("/");
@@ -85,9 +89,64 @@ async fn handle_text(text: &str, tx: &mpsc::Sender<MarketEvent>) -> anyhow::Resu
             recv_time_ms,
         };
         tx.send(MarketEvent::Quote(tick)).await?;
+    } else if stream.ends_with("@forceOrder") {
+        match parse_force_order(&data, recv_time_ms) {
+            Ok(Some(tick)) => {
+                debug!(
+                    symbol = %tick.symbol,
+                    side = tick.side.as_str(),
+                    price = tick.price,
+                    quantity = tick.quantity,
+                    "binance liquidation event received"
+                );
+                tx.send(MarketEvent::Liquidation(tick)).await?;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(error = %err, stream, "failed to parse binance forceOrder payload");
+            }
+        }
     }
 
     Ok(())
+}
+
+fn parse_force_order(data: &Value, recv_time_ms: i64) -> anyhow::Result<Option<LiquidationTick>> {
+    let order = match data.get("o") {
+        Some(order) => order,
+        None => return Ok(None),
+    };
+    let symbol = order
+        .get("s")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing liquidation symbol"))?;
+    let side_raw = order
+        .get("S")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing liquidation side"))?;
+    let side = match side_raw {
+        "SELL" => Direction::Long,
+        "BUY" => Direction::Short,
+        other => return Err(anyhow::anyhow!("unexpected liquidation side {other}")),
+    };
+    let price = parse_f64(&order["p"]);
+    let quantity = parse_f64(&order["q"]);
+    let event_time_ms = data["E"].as_i64().unwrap_or(recv_time_ms);
+    if price <= 0.0 || quantity <= 0.0 {
+        return Err(anyhow::anyhow!(
+            "invalid liquidation price/quantity: price={price}, quantity={quantity}"
+        ));
+    }
+
+    Ok(Some(LiquidationTick {
+        symbol: symbol.to_string(),
+        venue: Venue::Binance,
+        recv_time_ms,
+        event_time_ms,
+        side,
+        price,
+        quantity,
+    }))
 }
 
 fn parse_f64(value: &Value) -> f64 {

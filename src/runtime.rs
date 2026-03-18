@@ -27,8 +27,10 @@ use crate::{
 #[derive(Debug, Default)]
 struct BlockCounters {
     warmup: u64,
-    directional_gate: u64,
-    both_failed: u64,
+    long_gate_blocked: u64,
+    short_gate_blocked: u64,
+    failed_by_gate: u64,
+    failed_by_threshold: u64,
     dual_pass_stronger_only: u64,
 }
 
@@ -36,8 +38,10 @@ impl BlockCounters {
     fn note(&mut self, kind: BlockKind, symbol: &str, venue: Venue, detail: &str) {
         let counter = match kind {
             BlockKind::Warmup => &mut self.warmup,
-            BlockKind::DirectionalGate => &mut self.directional_gate,
-            BlockKind::BothFailed => &mut self.both_failed,
+            BlockKind::LongGateBlocked => &mut self.long_gate_blocked,
+            BlockKind::ShortGateBlocked => &mut self.short_gate_blocked,
+            BlockKind::FailedByGate => &mut self.failed_by_gate,
+            BlockKind::FailedByThreshold => &mut self.failed_by_threshold,
             BlockKind::DualPassStrongerOnly => &mut self.dual_pass_stronger_only,
         };
         *counter += 1;
@@ -57,8 +61,10 @@ impl BlockCounters {
 #[derive(Debug, Clone, Copy)]
 enum BlockKind {
     Warmup,
-    DirectionalGate,
-    BothFailed,
+    LongGateBlocked,
+    ShortGateBlocked,
+    FailedByGate,
+    FailedByThreshold,
     DualPassStrongerOnly,
 }
 
@@ -66,8 +72,10 @@ impl BlockKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Warmup => "warmup",
-            Self::DirectionalGate => "directional_gate",
-            Self::BothFailed => "both_failed",
+            Self::LongGateBlocked => "long_gate_blocked",
+            Self::ShortGateBlocked => "short_gate_blocked",
+            Self::FailedByGate => "failed_by_gate",
+            Self::FailedByThreshold => "failed_by_threshold",
             Self::DualPassStrongerOnly => "dual_pass_stronger_only",
         }
     }
@@ -86,7 +94,9 @@ struct RuntimeStats {
     evaluations: u64,
     venue_signals: u64,
     market_signals: u64,
+    liquidation_events_seen: u64,
     venue_signal_counts: HashMap<(String, Venue), u64>,
+    interval_venue_signal_counts: HashMap<(String, Venue), u64>,
 }
 
 impl RuntimeStats {
@@ -100,10 +110,18 @@ impl RuntimeStats {
             .venue_signal_counts
             .entry((symbol.to_string(), venue))
             .or_insert(0) += 1;
+        *self
+            .interval_venue_signal_counts
+            .entry((symbol.to_string(), venue))
+            .or_insert(0) += 1;
     }
 
     fn note_market_signal(&mut self) {
         self.market_signals += 1;
+    }
+
+    fn note_liquidation_event(&mut self) {
+        self.liquidation_events_seen += 1;
     }
 }
 
@@ -112,9 +130,12 @@ struct SummarySnapshot {
     evaluations: u64,
     venue_signals: u64,
     market_signals: u64,
+    liquidation_events_seen: u64,
     blocked_warmup: u64,
-    blocked_gate: u64,
-    blocked_both_failed: u64,
+    blocked_long_gate: u64,
+    blocked_short_gate: u64,
+    failed_by_gate: u64,
+    failed_by_threshold: u64,
     blocked_dual_pass: u64,
 }
 
@@ -133,15 +154,32 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let mut runtime_stats = RuntimeStats::default();
     let mut last_summary_ms = now_ms();
     let mut last_summary_snapshot = SummarySnapshot::default();
+    let market_path_enabled =
+        config.enabled_venues().len() >= config.thresholds.market_min_confirmations;
 
     info!(
         symbols = ?config.symbols,
         venues = ?config.enabled_venues().iter().map(|venue| venue.as_str()).collect::<Vec<_>>(),
         sqlite_path = %config.sqlite_path,
+        market_path_enabled,
         "startup complete"
     );
 
     while let Some(event) = rx.recv().await {
+        if let MarketEvent::Liquidation(tick) = event {
+            if let Err(err) = persistence.send_liquidation_event(tick.clone()) {
+                error!(
+                    error = %err,
+                    symbol = %tick.symbol,
+                    venue = tick.venue.as_str(),
+                    "failed to persist liquidation event"
+                );
+            } else {
+                runtime_stats.note_liquidation_event();
+            }
+            continue;
+        }
+
         let key = (event.symbol().to_string(), event.venue());
         let symbol = key.0.clone();
         let venue = key.1;
@@ -165,6 +203,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
             match event {
                 MarketEvent::Trade(tick) => state.apply_trade(tick),
                 MarketEvent::Quote(tick) => state.apply_quote(tick),
+                MarketEvent::Liquidation(_) => unreachable!("liquidation events continue early"),
             }
 
             compute_features(state, &config.feature_windows, &config.zscore_windows)
@@ -230,36 +269,37 @@ pub async fn run(config: AppConfig) -> Result<()> {
                 warmup,
             );
 
-            let symbol_snapshots = latest_scores
-                .values()
-                .filter(|snapshot| snapshot.symbol == symbol)
-                .cloned()
-                .collect::<Vec<_>>();
+            if market_path_enabled {
+                let symbol_snapshots = latest_scores
+                    .values()
+                    .filter(|snapshot| snapshot.symbol == symbol)
+                    .cloned()
+                    .collect::<Vec<_>>();
 
-            let market = compute_market_confirmation(
-                &symbol,
-                &symbol_snapshots,
-                &config.score_weights,
-                config.thresholds.venue_long_threshold,
-                config.thresholds.venue_short_threshold,
-            );
+                let market = compute_market_confirmation(
+                    &symbol,
+                    &symbol_snapshots,
+                    &config.score_weights,
+                    config.thresholds.venue_long_threshold,
+                    config.thresholds.venue_short_threshold,
+                );
 
-            emit_market_signal_if_needed(
-                &config,
-                &persistence,
-                &market_history,
-                &mut signal_registry,
-                &mut runtime_stats,
-                &symbol_snapshots,
-                &market,
-                &features,
-            );
+                emit_market_signal_if_needed(
+                    &config,
+                    &persistence,
+                    &market_history,
+                    &mut signal_registry,
+                    &mut runtime_stats,
+                    &symbol_snapshots,
+                    &market,
+                );
+            }
         }
 
         let summary_now_ms = now_ms();
         if summary_now_ms - last_summary_ms >= 60_000 {
             log_runtime_summary(
-                &runtime_stats,
+                &mut runtime_stats,
                 &block_counters,
                 &venue_states,
                 &config,
@@ -313,23 +353,40 @@ fn emit_venue_signal_if_needed(
     let short_candidate =
         short_directional_gate && snapshot.short_score >= config.thresholds.venue_short_threshold;
 
-    if !long_directional_gate || !short_directional_gate {
+    if !long_directional_gate {
         block_counters.note(
-            BlockKind::DirectionalGate,
+            BlockKind::LongGateBlocked,
             &snapshot.symbol,
             snapshot.venue,
-            "directional gate blocked at least one side",
+            "long directional gate blocked",
+        );
+    }
+    if !short_directional_gate {
+        block_counters.note(
+            BlockKind::ShortGateBlocked,
+            &snapshot.symbol,
+            snapshot.venue,
+            "short directional gate blocked",
         );
     }
 
     let selected = match (long_candidate, short_candidate) {
         (false, false) => {
-            block_counters.note(
-                BlockKind::BothFailed,
-                &snapshot.symbol,
-                snapshot.venue,
-                "both directional candidates failed threshold/gate",
-            );
+            if !long_directional_gate && !short_directional_gate {
+                block_counters.note(
+                    BlockKind::FailedByGate,
+                    &snapshot.symbol,
+                    snapshot.venue,
+                    "no candidates survived directional gate",
+                );
+            } else {
+                block_counters.note(
+                    BlockKind::FailedByThreshold,
+                    &snapshot.symbol,
+                    snapshot.venue,
+                    "directional gate passed on at least one side but threshold failed",
+                );
+            }
             None
         }
         (true, false) => Some((Direction::Long, snapshot.long_score)),
@@ -368,6 +425,15 @@ fn emit_venue_signal_if_needed(
                 >= config.directional_gates.short_volume_z_gate + volume_margin
         }
     };
+    let component_contributions = component_contributions(config, features, direction);
+    let reason_tags = reason_tags(
+        config,
+        features,
+        direction,
+        emitted_directional_core,
+        volume_confirmed,
+        &component_contributions,
+    );
     let feature_json = match serde_json::to_string(&serde_json::json!({
         "bucket_time_ms": features.bucket_time_ms,
         "warmup": {
@@ -403,6 +469,8 @@ fn emit_venue_signal_if_needed(
             "volume_confirmed": volume_confirmed,
             "emitted_direction": direction.as_str(),
         },
+        "reason_tags": reason_tags.clone(),
+        "component_contributions": component_contributions,
         "features": features,
     })) {
         Ok(json) => json,
@@ -486,6 +554,7 @@ fn emit_venue_signal_if_needed(
             spread_shock,
             strong_directional_core,
             volume_confirmed,
+            reason_tags = ?reason_tags,
             "venue signal emitted"
         );
 
@@ -512,11 +581,10 @@ fn emit_market_signal_if_needed(
     runtime_stats: &mut RuntimeStats,
     symbol_snapshots: &[VenueScoreSnapshot],
     market: &crate::scoring::MarketConfirmation,
-    features: &FeatureSnapshot,
 ) {
     let feature_json = match serde_json::to_string(&serde_json::json!({
         "market": market,
-        "features": features,
+        "note": "market payload excludes venue-local feature snapshot",
         "venues": symbol_snapshots,
     })) {
         Ok(json) => json,
@@ -634,8 +702,135 @@ fn warmup_status(config: &AppConfig, state: &RollingState, now_ms: i64) -> Warmu
     }
 }
 
+fn component_contributions(
+    config: &AppConfig,
+    features: &FeatureSnapshot,
+    direction: Direction,
+) -> serde_json::Value {
+    let return_1s = match direction {
+        Direction::Long => config.score_weights.return_1s * (-features.return_1s_zscore).max(0.0),
+        Direction::Short => config.score_weights.return_1s * features.return_1s_zscore.max(0.0),
+    };
+    let return_5s = match direction {
+        Direction::Long => config.score_weights.return_5s * (-features.return_5s_zscore).max(0.0),
+        Direction::Short => config.score_weights.return_5s * features.return_5s_zscore.max(0.0),
+    };
+    let signed_volume_1s = match direction {
+        Direction::Long => {
+            config.score_weights.signed_volume_1s * (-features.signed_volume_1s_z).max(0.0)
+        }
+        Direction::Short => {
+            config.score_weights.signed_volume_1s * features.signed_volume_1s_z.max(0.0)
+        }
+    };
+    let signed_volume_5s = match direction {
+        Direction::Long => {
+            config.score_weights.signed_volume_5s * (-features.signed_volume_5s_z).max(0.0)
+        }
+        Direction::Short => {
+            config.score_weights.signed_volume_5s * features.signed_volume_5s_z.max(0.0)
+        }
+    };
+    let directional_trade_burst = match direction {
+        Direction::Long => features
+            .trade_count_1s_z
+            .max(features.trade_count_5s_z)
+            .max((-features.signed_volume_1s_z).max(0.0))
+            .max((-features.signed_volume_5s_z).max(0.0))
+            .max(0.0),
+        Direction::Short => features
+            .trade_count_1s_z
+            .max(features.trade_count_5s_z)
+            .max(features.signed_volume_1s_z.max(0.0))
+            .max(features.signed_volume_5s_z.max(0.0))
+            .max(0.0),
+    };
+    let capped_spread_z = features.spread_bps_zscore.max(0.0).min(5.0);
+    let volatility_burst_z = features
+        .realized_vol_5s_z
+        .max(features.realized_vol_15s_z)
+        .max(0.0);
+    let trade_burst = config.score_weights.trade_burst * directional_trade_burst;
+    let spread_widening = config.score_weights.spread_widening * capped_spread_z;
+    let volatility_burst = config.score_weights.volatility_burst * volatility_burst_z;
+    let directional_core = return_1s + return_5s + signed_volume_1s + signed_volume_5s;
+    let stress =
+        (1.0 + trade_burst + spread_widening + volatility_burst).min(config.max_stress_amplifier);
+
+    serde_json::json!({
+        "direction": direction.as_str(),
+        "return_1s": return_1s,
+        "return_5s": return_5s,
+        "signed_volume_1s": signed_volume_1s,
+        "signed_volume_5s": signed_volume_5s,
+        "trade_burst": trade_burst,
+        "spread_widening": spread_widening,
+        "volatility_burst": volatility_burst,
+        "directional_core": directional_core,
+        "stress": stress,
+    })
+}
+
+fn reason_tags(
+    config: &AppConfig,
+    features: &FeatureSnapshot,
+    direction: Direction,
+    emitted_directional_core: f64,
+    volume_confirmed: bool,
+    component_contributions: &serde_json::Value,
+) -> Vec<String> {
+    let mut tags = Vec::new();
+    match direction {
+        Direction::Long => {
+            if features.return_1s_zscore <= -config.directional_gates.long_return_z_gate {
+                tags.push("downside_return_impulse".to_string());
+            }
+            if features.signed_volume_1s_z <= -config.directional_gates.long_volume_z_gate {
+                tags.push("sell_flow_impulse".to_string());
+            }
+        }
+        Direction::Short => {
+            if features.return_1s_zscore >= config.directional_gates.short_return_z_gate {
+                tags.push("upside_return_impulse".to_string());
+            }
+            if features.signed_volume_1s_z >= config.directional_gates.short_volume_z_gate {
+                tags.push("buy_flow_impulse".to_string());
+            }
+        }
+    }
+
+    let trade_burst = component_contributions["trade_burst"]
+        .as_f64()
+        .unwrap_or_default();
+    let spread_widening = component_contributions["spread_widening"]
+        .as_f64()
+        .unwrap_or_default();
+    let volatility_burst = component_contributions["volatility_burst"]
+        .as_f64()
+        .unwrap_or_default();
+    if trade_burst >= 0.20 {
+        tags.push("trade_burst".to_string());
+    }
+    if spread_widening > 0.0 {
+        tags.push("spread_widening".to_string());
+    }
+    if features.spread_bps_zscore >= 5.0 {
+        tags.push("spread_shock".to_string());
+    }
+    if volatility_burst > 0.0 {
+        tags.push("volatility_burst".to_string());
+    }
+    if emitted_directional_core >= config.min_directional_core {
+        tags.push("strong_directional_core".to_string());
+    }
+    if volume_confirmed {
+        tags.push("volume_confirmed".to_string());
+    }
+    tags
+}
+
 fn log_runtime_summary(
-    runtime_stats: &RuntimeStats,
+    runtime_stats: &mut RuntimeStats,
     block_counters: &BlockCounters,
     venue_states: &HashMap<(String, Venue), RollingState>,
     config: &AppConfig,
@@ -661,9 +856,12 @@ fn log_runtime_summary(
         evaluations: runtime_stats.evaluations,
         venue_signals: runtime_stats.venue_signals,
         market_signals: runtime_stats.market_signals,
+        liquidation_events_seen: runtime_stats.liquidation_events_seen,
         blocked_warmup: block_counters.warmup,
-        blocked_gate: block_counters.directional_gate,
-        blocked_both_failed: block_counters.both_failed,
+        blocked_long_gate: block_counters.long_gate_blocked,
+        blocked_short_gate: block_counters.short_gate_blocked,
+        failed_by_gate: block_counters.failed_by_gate,
+        failed_by_threshold: block_counters.failed_by_threshold,
         blocked_dual_pass: block_counters.dual_pass_stronger_only,
     };
     let evaluations_interval = current_snapshot.evaluations - last_summary_snapshot.evaluations;
@@ -671,13 +869,30 @@ fn log_runtime_summary(
         current_snapshot.venue_signals - last_summary_snapshot.venue_signals;
     let market_signals_interval =
         current_snapshot.market_signals - last_summary_snapshot.market_signals;
+    let liquidation_events_interval =
+        current_snapshot.liquidation_events_seen - last_summary_snapshot.liquidation_events_seen;
     let blocked_warmup_interval =
         current_snapshot.blocked_warmup - last_summary_snapshot.blocked_warmup;
-    let blocked_gate_interval = current_snapshot.blocked_gate - last_summary_snapshot.blocked_gate;
-    let blocked_both_failed_interval =
-        current_snapshot.blocked_both_failed - last_summary_snapshot.blocked_both_failed;
+    let blocked_long_gate_interval =
+        current_snapshot.blocked_long_gate - last_summary_snapshot.blocked_long_gate;
+    let blocked_short_gate_interval =
+        current_snapshot.blocked_short_gate - last_summary_snapshot.blocked_short_gate;
+    let failed_by_gate_interval =
+        current_snapshot.failed_by_gate - last_summary_snapshot.failed_by_gate;
+    let failed_by_threshold_interval =
+        current_snapshot.failed_by_threshold - last_summary_snapshot.failed_by_threshold;
     let blocked_dual_pass_interval =
         current_snapshot.blocked_dual_pass - last_summary_snapshot.blocked_dual_pass;
+    let per_state_interval = if runtime_stats.interval_venue_signal_counts.is_empty() {
+        "none".to_string()
+    } else {
+        runtime_stats
+            .interval_venue_signal_counts
+            .iter()
+            .map(|((symbol, venue), count)| format!("{symbol}:{}={count}", venue.as_str()))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     *last_summary_snapshot = current_snapshot;
 
     info!(
@@ -687,12 +902,18 @@ fn log_runtime_summary(
         venue_signals_interval,
         market_signals = runtime_stats.market_signals,
         market_signals_interval,
+        liquidation_events_seen = runtime_stats.liquidation_events_seen,
+        liquidation_events_interval,
         blocked_warmup = block_counters.warmup,
         blocked_warmup_interval,
-        blocked_gate = block_counters.directional_gate,
-        blocked_gate_interval,
-        blocked_both_failed = block_counters.both_failed,
-        blocked_both_failed_interval,
+        blocked_long_gate = block_counters.long_gate_blocked,
+        blocked_long_gate_interval,
+        blocked_short_gate = block_counters.short_gate_blocked,
+        blocked_short_gate_interval,
+        failed_by_gate = block_counters.failed_by_gate,
+        failed_by_gate_interval,
+        failed_by_threshold = block_counters.failed_by_threshold,
+        failed_by_threshold_interval,
         blocked_dual_pass = block_counters.dual_pass_stronger_only,
         blocked_dual_pass_interval,
         active_states,
@@ -706,9 +927,12 @@ fn log_runtime_summary(
         short_volume_z_gate = config.directional_gates.short_volume_z_gate,
         spread_widening_weight = config.score_weights.spread_widening,
         venue_event_s = config.cooldowns.venue_event_s,
-        per_state = %per_state,
+        per_state_total = %per_state,
+        per_state_interval = %per_state_interval,
         "runtime summary"
     );
+
+    runtime_stats.interval_venue_signal_counts.clear();
 }
 
 fn blended_market_price(
