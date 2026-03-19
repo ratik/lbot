@@ -15,6 +15,7 @@ log_level = "info"
 [venues.binance]
 enabled = true
 analysis_enabled = true
+book_ticker_emit_interval_ms = 10
 url = "wss://fstream.binance.com/stream"
 
 [venues.bybit]

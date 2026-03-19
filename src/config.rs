@@ -194,21 +194,25 @@ impl Default for VenueConfig {
             binance: VenueSettings {
                 enabled: true,
                 analysis_enabled: true,
+                book_ticker_emit_interval_ms: 0,
                 url: "wss://fstream.binance.com/stream".to_string(),
             },
             bybit: VenueSettings {
                 enabled: false,
                 analysis_enabled: true,
+                book_ticker_emit_interval_ms: 0,
                 url: "wss://stream.bybit.com/v5/public/linear".to_string(),
             },
             okx: VenueSettings {
                 enabled: false,
                 analysis_enabled: true,
+                book_ticker_emit_interval_ms: 0,
                 url: "wss://ws.okx.com:8443/ws/v5/public".to_string(),
             },
             dydx: VenueSettings {
                 enabled: false,
                 analysis_enabled: true,
+                book_ticker_emit_interval_ms: 0,
                 url: "wss://indexer.dydx.trade/v4/ws".to_string(),
             },
         }
@@ -221,6 +225,8 @@ pub struct VenueSettings {
     pub enabled: bool,
     #[serde(default = "default_enabled")]
     pub analysis_enabled: bool,
+    #[serde(default)]
+    pub book_ticker_emit_interval_ms: u64,
     pub url: String,
 }
 
@@ -229,6 +235,7 @@ impl Default for VenueSettings {
         Self {
             enabled: false,
             analysis_enabled: true,
+            book_ticker_emit_interval_ms: 0,
             url: String::new(),
         }
     }
