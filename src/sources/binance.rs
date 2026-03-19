@@ -121,110 +121,115 @@ pub fn spawn(config: &AppConfig, tx: mpsc::Sender<MarketEvent>) -> JoinHandle<()
         format!("{}?streams={streams}", settings.url)
     };
     let book_ticker_emit_interval_ms = config.venues.binance.book_ticker_emit_interval_ms;
+    let stream_stats_enabled = config.venues.binance.stream_stats_enabled;
     let stats = Arc::new(BinanceSourceStats::default());
     let reporter_stats = Arc::clone(&stats);
 
     tokio::spawn(async move {
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(SUMMARY_INTERVAL_SECS)).await;
+        if stream_stats_enabled {
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(SUMMARY_INTERVAL_SECS)).await;
 
-                let messages_received = reporter_stats.messages_received.swap(0, Ordering::Relaxed);
-                let trade_received = reporter_stats.trade_received.swap(0, Ordering::Relaxed);
-                let trade_forwarded = reporter_stats.trade_forwarded.swap(0, Ordering::Relaxed);
-                let trade_dropped = reporter_stats.trade_dropped.swap(0, Ordering::Relaxed);
-                let book_ticker_received = reporter_stats
-                    .book_ticker_received
-                    .swap(0, Ordering::Relaxed);
-                let book_ticker_forwarded = reporter_stats
-                    .book_ticker_forwarded
-                    .swap(0, Ordering::Relaxed);
-                let book_ticker_dropped = reporter_stats
-                    .book_ticker_dropped
-                    .swap(0, Ordering::Relaxed);
-                let book_ticker_coalesced = reporter_stats
-                    .book_ticker_coalesced
-                    .swap(0, Ordering::Relaxed);
-                let force_order_received = reporter_stats
-                    .force_order_received
-                    .swap(0, Ordering::Relaxed);
-                let force_order_forwarded = reporter_stats
-                    .force_order_forwarded
-                    .swap(0, Ordering::Relaxed);
-                let force_order_dropped = reporter_stats
-                    .force_order_dropped
-                    .swap(0, Ordering::Relaxed);
-                let ping_received = reporter_stats.ping_received.swap(0, Ordering::Relaxed);
-                let pong_received = reporter_stats.pong_received.swap(0, Ordering::Relaxed);
-                let reconnect_count_total = reporter_stats.reconnect_count.load(Ordering::Relaxed);
-                let internal_queue_len = reporter_stats
-                    .internal_queue_depth
-                    .load(Ordering::Relaxed)
-                    .max(0);
-                let dropped_total_interval =
-                    trade_dropped + book_ticker_dropped + force_order_dropped;
+                    let messages_received =
+                        reporter_stats.messages_received.swap(0, Ordering::Relaxed);
+                    let trade_received = reporter_stats.trade_received.swap(0, Ordering::Relaxed);
+                    let trade_forwarded = reporter_stats.trade_forwarded.swap(0, Ordering::Relaxed);
+                    let trade_dropped = reporter_stats.trade_dropped.swap(0, Ordering::Relaxed);
+                    let book_ticker_received = reporter_stats
+                        .book_ticker_received
+                        .swap(0, Ordering::Relaxed);
+                    let book_ticker_forwarded = reporter_stats
+                        .book_ticker_forwarded
+                        .swap(0, Ordering::Relaxed);
+                    let book_ticker_dropped = reporter_stats
+                        .book_ticker_dropped
+                        .swap(0, Ordering::Relaxed);
+                    let book_ticker_coalesced = reporter_stats
+                        .book_ticker_coalesced
+                        .swap(0, Ordering::Relaxed);
+                    let force_order_received = reporter_stats
+                        .force_order_received
+                        .swap(0, Ordering::Relaxed);
+                    let force_order_forwarded = reporter_stats
+                        .force_order_forwarded
+                        .swap(0, Ordering::Relaxed);
+                    let force_order_dropped = reporter_stats
+                        .force_order_dropped
+                        .swap(0, Ordering::Relaxed);
+                    let ping_received = reporter_stats.ping_received.swap(0, Ordering::Relaxed);
+                    let pong_received = reporter_stats.pong_received.swap(0, Ordering::Relaxed);
+                    let reconnect_count_total =
+                        reporter_stats.reconnect_count.load(Ordering::Relaxed);
+                    let internal_queue_len = reporter_stats
+                        .internal_queue_depth
+                        .load(Ordering::Relaxed)
+                        .max(0);
+                    let dropped_total_interval =
+                        trade_dropped + book_ticker_dropped + force_order_dropped;
 
-                let trade_drop_rate = rate(trade_dropped, trade_received);
-                let book_ticker_drop_rate = rate(book_ticker_dropped, book_ticker_received);
-                let force_order_drop_rate = rate(force_order_dropped, force_order_received);
+                    let trade_drop_rate = rate(trade_dropped, trade_received);
+                    let book_ticker_drop_rate = rate(book_ticker_dropped, book_ticker_received);
+                    let force_order_drop_rate = rate(force_order_dropped, force_order_received);
 
-                if dropped_total_interval > 0 {
-                    warn!(
-                        venue = "binance",
-                        interval_s = SUMMARY_INTERVAL_SECS,
-                        book_ticker_emit_interval_ms,
-                        messages_received,
-                        trade_received,
-                        trade_forwarded,
-                        trade_dropped,
-                        trade_drop_rate,
-                        book_ticker_received,
-                        book_ticker_forwarded,
-                        book_ticker_dropped,
-                        book_ticker_coalesced,
-                        book_ticker_drop_rate,
-                        force_order_received,
-                        force_order_forwarded,
-                        force_order_dropped,
-                        force_order_drop_rate,
-                        dropped_total_interval,
-                        ping_received,
-                        pong_received,
-                        internal_queue_capacity = INTERNAL_QUEUE_CAPACITY,
-                        internal_queue_len,
-                        reconnect_count_total,
-                        "binance stream stats"
-                    );
-                } else {
-                    info!(
-                        venue = "binance",
-                        interval_s = SUMMARY_INTERVAL_SECS,
-                        book_ticker_emit_interval_ms,
-                        messages_received,
-                        trade_received,
-                        trade_forwarded,
-                        trade_dropped,
-                        trade_drop_rate,
-                        book_ticker_received,
-                        book_ticker_forwarded,
-                        book_ticker_dropped,
-                        book_ticker_coalesced,
-                        book_ticker_drop_rate,
-                        force_order_received,
-                        force_order_forwarded,
-                        force_order_dropped,
-                        force_order_drop_rate,
-                        dropped_total_interval,
-                        ping_received,
-                        pong_received,
-                        internal_queue_capacity = INTERNAL_QUEUE_CAPACITY,
-                        internal_queue_len,
-                        reconnect_count_total,
-                        "binance stream stats"
-                    );
+                    if dropped_total_interval > 0 {
+                        warn!(
+                            venue = "binance",
+                            interval_s = SUMMARY_INTERVAL_SECS,
+                            book_ticker_emit_interval_ms,
+                            messages_received,
+                            trade_received,
+                            trade_forwarded,
+                            trade_dropped,
+                            trade_drop_rate,
+                            book_ticker_received,
+                            book_ticker_forwarded,
+                            book_ticker_dropped,
+                            book_ticker_coalesced,
+                            book_ticker_drop_rate,
+                            force_order_received,
+                            force_order_forwarded,
+                            force_order_dropped,
+                            force_order_drop_rate,
+                            dropped_total_interval,
+                            ping_received,
+                            pong_received,
+                            internal_queue_capacity = INTERNAL_QUEUE_CAPACITY,
+                            internal_queue_len,
+                            reconnect_count_total,
+                            "binance stream stats"
+                        );
+                    } else {
+                        info!(
+                            venue = "binance",
+                            interval_s = SUMMARY_INTERVAL_SECS,
+                            book_ticker_emit_interval_ms,
+                            messages_received,
+                            trade_received,
+                            trade_forwarded,
+                            trade_dropped,
+                            trade_drop_rate,
+                            book_ticker_received,
+                            book_ticker_forwarded,
+                            book_ticker_dropped,
+                            book_ticker_coalesced,
+                            book_ticker_drop_rate,
+                            force_order_received,
+                            force_order_forwarded,
+                            force_order_dropped,
+                            force_order_drop_rate,
+                            dropped_total_interval,
+                            ping_received,
+                            pong_received,
+                            internal_queue_capacity = INTERNAL_QUEUE_CAPACITY,
+                            internal_queue_len,
+                            reconnect_count_total,
+                            "binance stream stats"
+                        );
+                    }
                 }
-            }
-        });
+            });
+        }
 
         loop {
             stats.reconnect_count.fetch_add(1, Ordering::Relaxed);
