@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     config::AppConfig,
@@ -25,6 +25,12 @@ pub struct EvaluationRequest {
 pub struct TimedPrice {
     pub time_ms: i64,
     pub price: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PriceLookup {
+    anchor: TimedPrice,
+    future: TimedPrice,
 }
 
 #[derive(Debug, Default)]
@@ -48,35 +54,48 @@ impl MarketHistory {
         }
     }
 
-    pub fn evaluate(
+    fn evaluate_with_lookup(
         &self,
         request: &EvaluationRequest,
         horizon_s: u64,
         success_threshold_bps: f64,
-    ) -> Option<OutcomeCheckEvent> {
+    ) -> Option<(PriceLookup, OutcomeCheckEvent)> {
         let history = self.prices.get(&request.symbol)?;
-        let horizon_ms = request.event_time_ms + (horizon_s as i64) * 1000;
-        let mut window = history
-            .iter()
-            .filter(|point| point.time_ms >= request.event_time_ms && point.time_ms <= horizon_ms);
+        let target_time_ms = request.event_time_ms + (horizon_s as i64) * 1000;
 
-        let first = window.next()?;
-        let mut last = first;
-        let mut max_price = first.price;
-        let mut min_price = first.price;
-        let mut prices = vec![first.price];
+        // Allow a pre-event anchor because the triggering quote may have been recorded
+        // slightly before the signal timestamp assigned from the processed market data.
+        let anchor = history
+            .iter()
+            .rev()
+            .find(|point| point.time_ms <= request.event_time_ms)
+            .cloned()
+            .or_else(|| {
+                history
+                    .iter()
+                    .find(|point| point.time_ms > request.event_time_ms)
+                    .cloned()
+            })?;
+
+        let future = history
+            .iter()
+            .find(|point| point.time_ms >= target_time_ms)
+            .cloned()?;
+
+        let mut max_price = future.price;
+        let mut min_price = future.price;
+        let mut prices = vec![anchor.price];
 
         for point in history
             .iter()
-            .filter(|point| point.time_ms > first.time_ms && point.time_ms <= horizon_ms)
+            .filter(|point| point.time_ms > anchor.time_ms && point.time_ms <= future.time_ms)
         {
-            last = point;
             max_price = max_price.max(point.price);
             min_price = min_price.min(point.price);
             prices.push(point.price);
         }
 
-        let return_bps = bps_move(request.reference_price, last.price, request.direction);
+        let return_bps = bps_move(request.reference_price, future.price, request.direction);
         let max_favorable_bps = match request.direction {
             Direction::Long => bps_move(request.reference_price, min_price, Direction::Long),
             Direction::Short => bps_move(request.reference_price, max_price, Direction::Short),
@@ -87,15 +106,18 @@ impl MarketHistory {
         };
         let realized_vol_after = realized_vol(&prices);
 
-        Some(OutcomeCheckEvent {
-            event_id: request.event_id.clone(),
-            horizon_s,
-            return_bps,
-            max_favorable_bps,
-            max_adverse_bps,
-            realized_vol_after,
-            success_flag: max_favorable_bps >= success_threshold_bps,
-        })
+        Some((
+            PriceLookup { anchor, future },
+            OutcomeCheckEvent {
+                event_id: request.event_id.clone(),
+                horizon_s,
+                return_bps,
+                max_favorable_bps,
+                max_adverse_bps,
+                realized_vol_after,
+                success_flag: max_favorable_bps >= success_threshold_bps,
+            },
+        ))
     }
 }
 
@@ -115,12 +137,20 @@ pub fn spawn_evaluation_tasks(
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(horizon_s)).await;
             let success_threshold_bps = config.symbol_success_threshold_bps(&symbol);
+            let target_time_ms = request.event_time_ms + (horizon_s as i64) * 1000;
             let outcome = {
                 let history = market_history.lock().expect("market history lock poisoned");
-                history.evaluate(&request, horizon_s, success_threshold_bps)
+                history.evaluate_with_lookup(&request, horizon_s, success_threshold_bps)
             };
             match outcome {
-                Some(outcome) => {
+                Some((lookup, outcome)) => {
+                    debug!(
+                        event_id = %request.event_id,
+                        horizon_s,
+                        anchor_time_ms = lookup.anchor.time_ms,
+                        future_time_ms = lookup.future.time_ms,
+                        "outcome evaluation lookup succeeded"
+                    );
                     if let Err(err) = persistence.send_outcome(outcome.clone()) {
                         warn!(error = %err, event_id = %outcome.event_id, "failed to persist outcome");
                     } else {
@@ -136,6 +166,10 @@ pub fn spawn_evaluation_tasks(
                     event_id = %request.event_id,
                     symbol = %request.symbol,
                     horizon_s,
+                    event_time_ms = request.event_time_ms,
+                    target_time_ms,
+                    anchor_lookup = "missing",
+                    future_lookup = "missing_or_before_target",
                     "insufficient price history for outcome evaluation"
                 ),
             }

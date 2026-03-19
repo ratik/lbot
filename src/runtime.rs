@@ -237,7 +237,11 @@ pub async fn run(config: AppConfig) -> Result<()> {
                     )
                 })
                 .unwrap_or_default();
-            let snapshot_time_ms = now_ms();
+            let snapshot_time_ms = if features.bucket_time_ms > 0 {
+                features.bucket_time_ms
+            } else {
+                now_ms()
+            };
             let warmup = warmup_status(
                 &config,
                 venue_states.get(&key).expect("state exists"),
