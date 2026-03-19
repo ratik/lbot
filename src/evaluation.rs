@@ -12,6 +12,8 @@ use crate::{
     types::{Direction, OutcomeCheckEvent},
 };
 
+const MAX_FUTURE_STALENESS_MS: i64 = 2_000;
+
 #[derive(Debug, Clone)]
 pub struct EvaluationRequest {
     pub event_id: String,
@@ -31,6 +33,84 @@ pub struct TimedPrice {
 struct PriceLookup {
     anchor: TimedPrice,
     future: TimedPrice,
+    future_lookup_mode: FutureLookupMode,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FutureLookupMode {
+    ExactOrAfterTarget,
+    FallbackBeforeTarget,
+}
+
+impl FutureLookupMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactOrAfterTarget => "exact_or_after_target",
+            Self::FallbackBeforeTarget => "fallback_before_target",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LookupDiagnostics {
+    anchor_lookup: &'static str,
+    future_lookup: &'static str,
+    nearest_before_target_ts: Option<i64>,
+    nearest_after_target_ts: Option<i64>,
+    delta_before_ms: Option<i64>,
+    delta_after_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+enum EvaluationFailure {
+    MissingSymbolHistory,
+    MissingAnchor {
+        nearest_after_event_ts: Option<i64>,
+    },
+    MissingFuture {
+        nearest_before_target_ts: Option<i64>,
+        nearest_after_target_ts: Option<i64>,
+        delta_before_ms: Option<i64>,
+        delta_after_ms: Option<i64>,
+    },
+}
+
+impl EvaluationFailure {
+    fn diagnostics(&self) -> LookupDiagnostics {
+        match self {
+            Self::MissingSymbolHistory => LookupDiagnostics {
+                anchor_lookup: "missing",
+                future_lookup: "not_attempted",
+                nearest_before_target_ts: None,
+                nearest_after_target_ts: None,
+                delta_before_ms: None,
+                delta_after_ms: None,
+            },
+            Self::MissingAnchor {
+                nearest_after_event_ts,
+            } => LookupDiagnostics {
+                anchor_lookup: "missing",
+                future_lookup: "not_attempted",
+                nearest_before_target_ts: None,
+                nearest_after_target_ts: *nearest_after_event_ts,
+                delta_before_ms: None,
+                delta_after_ms: None,
+            },
+            Self::MissingFuture {
+                nearest_before_target_ts,
+                nearest_after_target_ts,
+                delta_before_ms,
+                delta_after_ms,
+            } => LookupDiagnostics {
+                anchor_lookup: "ok",
+                future_lookup: "missing_at_or_after_target",
+                nearest_before_target_ts: *nearest_before_target_ts,
+                nearest_after_target_ts: *nearest_after_target_ts,
+                delta_before_ms: *delta_before_ms,
+                delta_after_ms: *delta_after_ms,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -59,8 +139,11 @@ impl MarketHistory {
         request: &EvaluationRequest,
         horizon_s: u64,
         success_threshold_bps: f64,
-    ) -> Option<(PriceLookup, OutcomeCheckEvent)> {
-        let history = self.prices.get(&request.symbol)?;
+    ) -> Result<(PriceLookup, OutcomeCheckEvent), EvaluationFailure> {
+        let history = self
+            .prices
+            .get(&request.symbol)
+            .ok_or(EvaluationFailure::MissingSymbolHistory)?;
         let target_time_ms = request.event_time_ms + (horizon_s as i64) * 1000;
 
         // Allow a pre-event anchor because the triggering quote may have been recorded
@@ -75,12 +158,42 @@ impl MarketHistory {
                     .iter()
                     .find(|point| point.time_ms > request.event_time_ms)
                     .cloned()
+            })
+            .ok_or_else(|| EvaluationFailure::MissingAnchor {
+                nearest_after_event_ts: history
+                    .iter()
+                    .find(|point| point.time_ms > request.event_time_ms)
+                    .map(|point| point.time_ms),
             })?;
 
-        let future = history
+        let first_at_or_after_target = history
             .iter()
             .find(|point| point.time_ms >= target_time_ms)
-            .cloned()?;
+            .cloned();
+        let latest_before_target = history
+            .iter()
+            .rev()
+            .find(|point| point.time_ms < target_time_ms)
+            .cloned();
+
+        let (future, future_lookup_mode) = match first_at_or_after_target {
+            Some(point) => (point, FutureLookupMode::ExactOrAfterTarget),
+            None => match latest_before_target {
+                Some(point) if target_time_ms - point.time_ms <= MAX_FUTURE_STALENESS_MS => {
+                    (point, FutureLookupMode::FallbackBeforeTarget)
+                }
+                maybe_point => {
+                    return Err(EvaluationFailure::MissingFuture {
+                        nearest_before_target_ts: maybe_point.as_ref().map(|point| point.time_ms),
+                        nearest_after_target_ts: None,
+                        delta_before_ms: maybe_point
+                            .as_ref()
+                            .map(|point| target_time_ms - point.time_ms),
+                        delta_after_ms: None,
+                    });
+                }
+            },
+        };
 
         let mut max_price = future.price;
         let mut min_price = future.price;
@@ -106,8 +219,12 @@ impl MarketHistory {
         };
         let realized_vol_after = realized_vol(&prices);
 
-        Some((
-            PriceLookup { anchor, future },
+        Ok((
+            PriceLookup {
+                anchor,
+                future,
+                future_lookup_mode,
+            },
             OutcomeCheckEvent {
                 event_id: request.event_id.clone(),
                 horizon_s,
@@ -143,12 +260,15 @@ pub fn spawn_evaluation_tasks(
                 history.evaluate_with_lookup(&request, horizon_s, success_threshold_bps)
             };
             match outcome {
-                Some((lookup, outcome)) => {
+                Ok((lookup, outcome)) => {
                     debug!(
                         event_id = %request.event_id,
+                        symbol = %request.symbol,
                         horizon_s,
                         anchor_time_ms = lookup.anchor.time_ms,
                         future_time_ms = lookup.future.time_ms,
+                        target_time_ms,
+                        future_lookup_mode = lookup.future_lookup_mode.as_str(),
                         "outcome evaluation lookup succeeded"
                     );
                     if let Err(err) = persistence.send_outcome(outcome.clone()) {
@@ -162,16 +282,23 @@ pub fn spawn_evaluation_tasks(
                         );
                     }
                 }
-                None => warn!(
-                    event_id = %request.event_id,
-                    symbol = %request.symbol,
-                    horizon_s,
-                    event_time_ms = request.event_time_ms,
-                    target_time_ms,
-                    anchor_lookup = "missing",
-                    future_lookup = "missing_or_before_target",
-                    "insufficient price history for outcome evaluation"
-                ),
+                Err(failure) => {
+                    let diagnostics = failure.diagnostics();
+                    warn!(
+                        event_id = %request.event_id,
+                        symbol = %request.symbol,
+                        horizon_s,
+                        event_time_ms = request.event_time_ms,
+                        target_time_ms,
+                        anchor_lookup = diagnostics.anchor_lookup,
+                        future_lookup = diagnostics.future_lookup,
+                        nearest_before_target_ts = diagnostics.nearest_before_target_ts,
+                        nearest_after_target_ts = diagnostics.nearest_after_target_ts,
+                        delta_before_ms = diagnostics.delta_before_ms,
+                        delta_after_ms = diagnostics.delta_after_ms,
+                        "insufficient price history for outcome evaluation"
+                    );
+                }
             }
         });
     }
