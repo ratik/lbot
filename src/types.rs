@@ -185,6 +185,20 @@ pub struct LiquidationOutcomeCheckEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperPositionRecord {
+    pub id: String,
+    pub symbol: String,
+    pub direction: Direction,
+    pub entry_price: f64,
+    pub exit_price: f64,
+    pub pnl: f64,
+    pub duration_ms: i64,
+    pub exit_reason: String,
+    pub entry_time_ms: i64,
+    pub exit_time_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatEvent {
     pub service_time_ms: i64,
     pub status: String,

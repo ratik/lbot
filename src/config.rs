@@ -38,6 +38,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub evaluation: EvaluationConfig,
     #[serde(default)]
+    pub paper: PaperConfig,
+    #[serde(default)]
     pub sqlite_path: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -147,6 +149,7 @@ impl Default for AppConfig {
             thresholds: ThresholdsConfig::default(),
             cooldowns: CooldownConfig::default(),
             evaluation: EvaluationConfig::default(),
+            paper: PaperConfig::default(),
             sqlite_path: "data/liquidation_watcher.sqlite".to_string(),
             log_level: default_log_level(),
         }
@@ -392,6 +395,68 @@ impl Default for EvaluationConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_paper_position_size")]
+    pub position_size: f64,
+    #[serde(default = "default_paper_leverage")]
+    pub leverage: f64,
+    #[serde(default = "default_paper_initial_balance")]
+    pub initial_balance: f64,
+    #[serde(default = "default_paper_maintenance_margin_ratio")]
+    pub maintenance_margin_ratio: f64,
+    #[serde(default = "default_paper_entry_delay_ms")]
+    pub entry_delay_ms: u64,
+    #[serde(default)]
+    pub entry_confirmation_mode: PaperEntryConfirmationMode,
+    #[serde(default = "default_paper_entry_confirmation_return_bps")]
+    pub entry_confirmation_return_bps: f64,
+    #[serde(default = "default_paper_entry_confirmation_max_adverse_bps")]
+    pub entry_confirmation_max_adverse_bps: f64,
+    #[serde(default = "default_paper_take_profit_bps")]
+    pub take_profit_bps: f64,
+    #[serde(default = "default_paper_stop_loss_bps")]
+    pub stop_loss_bps: f64,
+    #[serde(default = "default_paper_max_duration_s")]
+    pub max_duration_s: u64,
+    #[serde(default = "default_paper_max_concurrent_positions")]
+    pub max_concurrent_positions: usize,
+    #[serde(default = "default_true")]
+    pub one_position_per_symbol: bool,
+}
+
+impl Default for PaperConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position_size: default_paper_position_size(),
+            leverage: default_paper_leverage(),
+            initial_balance: default_paper_initial_balance(),
+            maintenance_margin_ratio: default_paper_maintenance_margin_ratio(),
+            entry_delay_ms: default_paper_entry_delay_ms(),
+            entry_confirmation_mode: PaperEntryConfirmationMode::default(),
+            entry_confirmation_return_bps: default_paper_entry_confirmation_return_bps(),
+            entry_confirmation_max_adverse_bps: default_paper_entry_confirmation_max_adverse_bps(),
+            take_profit_bps: default_paper_take_profit_bps(),
+            stop_loss_bps: default_paper_stop_loss_bps(),
+            max_duration_s: default_paper_max_duration_s(),
+            max_concurrent_positions: default_paper_max_concurrent_positions(),
+            one_position_per_symbol: default_true(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperEntryConfirmationMode {
+    #[default]
+    None,
+    Directional,
+    Pullback,
+}
+
 fn split_csv(value: &str) -> Vec<String> {
     value
         .split(',')
@@ -423,6 +488,10 @@ fn default_symbol_thresholds() -> HashMap<String, f64> {
 }
 
 fn default_enabled() -> bool {
+    true
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -518,6 +587,50 @@ fn default_rearm_ratio() -> f64 {
 
 fn default_market_confirmations() -> usize {
     2
+}
+
+fn default_paper_position_size() -> f64 {
+    1.0
+}
+
+fn default_paper_leverage() -> f64 {
+    5.0
+}
+
+fn default_paper_initial_balance() -> f64 {
+    10_000.0
+}
+
+fn default_paper_maintenance_margin_ratio() -> f64 {
+    0.005
+}
+
+fn default_paper_entry_delay_ms() -> u64 {
+    250
+}
+
+fn default_paper_entry_confirmation_return_bps() -> f64 {
+    1.0
+}
+
+fn default_paper_entry_confirmation_max_adverse_bps() -> f64 {
+    5.0
+}
+
+fn default_paper_take_profit_bps() -> f64 {
+    10.0
+}
+
+fn default_paper_stop_loss_bps() -> f64 {
+    10.0
+}
+
+fn default_paper_max_duration_s() -> u64 {
+    60
+}
+
+fn default_paper_max_concurrent_positions() -> usize {
+    5
 }
 
 fn default_venue_cooldown() -> u64 {

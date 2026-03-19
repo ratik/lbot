@@ -11,7 +11,7 @@ use tracing::error;
 
 use crate::types::{
     HeartbeatEvent, LiquidationOutcomeCheckEvent, LiquidationTick, MarketSignalEvent,
-    OutcomeCheckEvent, VenueSignalEvent,
+    OutcomeCheckEvent, PaperPositionRecord, VenueSignalEvent,
 };
 
 #[derive(Debug)]
@@ -21,6 +21,7 @@ enum PersistCommand {
     Liquidation(LiquidationTick),
     Outcome(OutcomeCheckEvent),
     LiquidationOutcome(LiquidationOutcomeCheckEvent),
+    PaperPosition(PaperPositionRecord),
     Heartbeat(HeartbeatEvent),
 }
 
@@ -79,6 +80,12 @@ impl PersistenceHandle {
             .context("liquidation outcome send failed")
     }
 
+    pub fn send_paper_position(&self, event: PaperPositionRecord) -> Result<()> {
+        self.tx
+            .send(PersistCommand::PaperPosition(event))
+            .context("paper position send failed")
+    }
+
     pub fn send_heartbeat(&self, event: HeartbeatEvent) -> Result<()> {
         self.tx
             .send(PersistCommand::Heartbeat(event))
@@ -99,6 +106,7 @@ fn run_worker(path: &str, rx: Receiver<PersistCommand>) -> Result<()> {
             PersistCommand::Liquidation(event) => insert_liquidation_event(&conn, &event)?,
             PersistCommand::Outcome(event) => insert_outcome(&conn, &event)?,
             PersistCommand::LiquidationOutcome(event) => insert_liquidation_outcome(&conn, &event)?,
+            PersistCommand::PaperPosition(event) => insert_paper_position(&conn, &event)?,
             PersistCommand::Heartbeat(event) => insert_heartbeat(&conn, &event)?,
         }
     }
@@ -173,6 +181,19 @@ fn init_schema(conn: &Connection) -> Result<()> {
             liq_first_seen_time_ms INTEGER,
             time_to_first_liq_ms INTEGER,
             PRIMARY KEY (event_id, horizon_s)
+        );
+
+        CREATE TABLE IF NOT EXISTS paper_positions (
+            id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            exit_price REAL NOT NULL,
+            pnl REAL NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            exit_reason TEXT NOT NULL,
+            entry_time_ms INTEGER NOT NULL,
+            exit_time_ms INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS service_heartbeats (
@@ -281,6 +302,27 @@ fn insert_liquidation_outcome(
             event.liq_max_qty,
             event.liq_first_seen_time_ms,
             event.time_to_first_liq_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_paper_position(conn: &Connection, event: &PaperPositionRecord) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO paper_positions
+        (id, symbol, direction, entry_price, exit_price, pnl, duration_ms, exit_reason, entry_time_ms, exit_time_ms)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            event.id,
+            event.symbol,
+            event.direction.as_str(),
+            event.entry_price,
+            event.exit_price,
+            event.pnl,
+            event.duration_ms,
+            event.exit_reason,
+            event.entry_time_ms,
+            event.exit_time_ms,
         ],
     )?;
     Ok(())

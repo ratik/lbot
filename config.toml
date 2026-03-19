@@ -80,3 +80,19 @@ default_success_threshold_bps = 20.0
 BTCUSDT = 20.0
 ETHUSDT = 25.0
 SOLUSDT = 35.0
+
+[paper]
+enabled = true
+position_size = 1.0
+leverage = 5.0
+initial_balance = 10000.0
+maintenance_margin_ratio = 0.005
+entry_delay_ms = 250
+entry_confirmation_mode = "directional"
+entry_confirmation_return_bps = 1.0
+entry_confirmation_max_adverse_bps = 5.0
+take_profit_bps = 10.0
+stop_loss_bps = 10.0
+max_duration_s = 60
+max_concurrent_positions = 5
+one_position_per_symbol = true

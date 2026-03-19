@@ -1,6 +1,7 @@
 mod config;
 mod evaluation;
 mod features;
+mod paper_trading;
 mod persistence;
 mod runtime;
 mod scoring;

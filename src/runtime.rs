@@ -16,6 +16,7 @@ use crate::{
         SharedMarketHistory, spawn_evaluation_tasks,
     },
     features::{FeatureSnapshot, compute_features},
+    paper_trading::PaperEngine,
     persistence::PersistenceHandle,
     scoring::{compute_market_confirmation, compute_venue_scores},
     signals::{SignalKey, SignalRegistry, SignalScope},
@@ -150,6 +151,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let market_history: SharedMarketHistory = Arc::new(Mutex::new(MarketHistory::default()));
     let liquidation_history: SharedLiquidationHistory =
         Arc::new(Mutex::new(LiquidationHistory::default()));
+    let mut paper_engine = PaperEngine::new(config.paper.clone(), persistence.clone());
     spawn_heartbeat_task(persistence.clone());
 
     let mut venue_states: HashMap<(String, Venue), RollingState> = HashMap::new();
@@ -202,6 +204,8 @@ pub async fn run(config: AppConfig) -> Result<()> {
         let key = (event.symbol().to_string(), event.venue());
         let symbol = key.0.clone();
         let venue = key.1;
+
+        paper_engine.on_market_event(&event);
 
         if !config.venue_analysis_enabled(venue) {
             continue;
@@ -292,6 +296,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
                 &mut signal_registry,
                 &mut block_counters,
                 &mut runtime_stats,
+                &mut paper_engine,
                 &snapshot,
                 &features,
                 warmup,
@@ -319,6 +324,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
                     &liquidation_history,
                     &mut signal_registry,
                     &mut runtime_stats,
+                    &mut paper_engine,
                     &symbol_snapshots,
                     &market,
                 );
@@ -350,6 +356,7 @@ fn emit_venue_signal_if_needed(
     signal_registry: &mut SignalRegistry,
     block_counters: &mut BlockCounters,
     runtime_stats: &mut RuntimeStats,
+    paper_engine: &mut PaperEngine,
     snapshot: &VenueScoreSnapshot,
     features: &FeatureSnapshot,
     warmup: WarmupStatus,
@@ -546,6 +553,12 @@ fn emit_venue_signal_if_needed(
             return;
         }
         runtime_stats.note_venue_signal(&event.symbol, event.venue);
+        paper_engine.on_signal(
+            &event.event_id,
+            &event.symbol,
+            event.direction,
+            event.event_time_ms,
+        );
 
         warn!(
             event = if direction == Direction::Long { "VENUE_LONG_LIQ_RISK" } else { "VENUE_SHORT_LIQ_RISK" },
@@ -611,6 +624,7 @@ fn emit_market_signal_if_needed(
     liquidation_history: &SharedLiquidationHistory,
     signal_registry: &mut SignalRegistry,
     runtime_stats: &mut RuntimeStats,
+    paper_engine: &mut PaperEngine,
     symbol_snapshots: &[VenueScoreSnapshot],
     market: &crate::scoring::MarketConfirmation,
 ) {
@@ -686,6 +700,12 @@ fn emit_market_signal_if_needed(
                 continue;
             }
             runtime_stats.note_market_signal();
+            paper_engine.on_signal(
+                &event.event_id,
+                &event.symbol,
+                event.direction,
+                event.event_time_ms,
+            );
 
             info!(
                 event = if direction == Direction::Long { "MARKET_LONG_LIQ_RISK" } else { "MARKET_SHORT_LIQ_RISK" },
