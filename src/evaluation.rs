@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::AppConfig,
     persistence::PersistenceHandle,
-    types::{Direction, OutcomeCheckEvent},
+    types::{Direction, LiquidationOutcomeCheckEvent, OutcomeCheckEvent},
 };
 
 const MAX_FUTURE_STALENESS_MS: i64 = 2_000;
@@ -26,6 +26,14 @@ pub struct EvaluationRequest {
 #[derive(Debug, Clone)]
 pub struct TimedPrice {
     pub time_ms: i64,
+    pub price: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TimedLiquidation {
+    pub time_ms: i64,
+    pub side: Direction,
+    pub quantity: f64,
     pub price: f64,
 }
 
@@ -119,6 +127,13 @@ pub struct MarketHistory {
 }
 
 pub type SharedMarketHistory = Arc<Mutex<MarketHistory>>;
+
+#[derive(Debug, Default)]
+pub struct LiquidationHistory {
+    events: HashMap<String, VecDeque<TimedLiquidation>>,
+}
+
+pub type SharedLiquidationHistory = Arc<Mutex<LiquidationHistory>>;
 
 impl MarketHistory {
     pub fn record(&mut self, symbol: &str, time_ms: i64, price: f64) {
@@ -238,10 +253,88 @@ impl MarketHistory {
     }
 }
 
+impl LiquidationHistory {
+    pub fn record(
+        &mut self,
+        symbol: &str,
+        side: Direction,
+        time_ms: i64,
+        quantity: f64,
+        price: f64,
+    ) {
+        let history = self.events.entry(symbol.to_string()).or_default();
+        history.push_back(TimedLiquidation {
+            time_ms,
+            side,
+            quantity,
+            price,
+        });
+        let cutoff = time_ms - 20 * 60 * 1000;
+        while history
+            .front()
+            .map(|event| event.time_ms < cutoff)
+            .unwrap_or(false)
+        {
+            history.pop_front();
+        }
+    }
+
+    fn evaluate_window(
+        &self,
+        request: &EvaluationRequest,
+        horizon_s: u64,
+    ) -> LiquidationOutcomeCheckEvent {
+        let target_time_ms = request.event_time_ms + (horizon_s as i64) * 1000;
+        let expected_liq_side = request.direction;
+        let matching = self
+            .events
+            .get(&request.symbol)
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|event| {
+                        event.side == expected_liq_side
+                            && event.time_ms >= request.event_time_ms
+                            && event.time_ms <= target_time_ms
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let liq_event_count = matching.len() as u64;
+        let liq_qty_sum = matching.iter().map(|event| event.quantity).sum::<f64>();
+        let liq_max_qty = matching
+            .iter()
+            .map(|event| event.quantity)
+            .fold(0.0_f64, f64::max);
+        let liq_first_seen_time_ms = matching.first().map(|event| event.time_ms);
+        let time_to_first_liq_ms =
+            liq_first_seen_time_ms.map(|time_ms| time_ms - request.event_time_ms);
+        let _max_price = matching
+            .iter()
+            .map(|event| event.price)
+            .fold(0.0_f64, f64::max);
+
+        LiquidationOutcomeCheckEvent {
+            event_id: request.event_id.clone(),
+            horizon_s,
+            expected_liq_side,
+            price_success_flag: false,
+            liq_success_flag: liq_event_count >= 1,
+            liq_event_count,
+            liq_qty_sum,
+            liq_max_qty,
+            liq_first_seen_time_ms,
+            time_to_first_liq_ms,
+        }
+    }
+}
+
 pub fn spawn_evaluation_tasks(
     config: Arc<AppConfig>,
     persistence: PersistenceHandle,
     market_history: SharedMarketHistory,
+    liquidation_history: SharedLiquidationHistory,
     request: EvaluationRequest,
 ) {
     let symbol = request.symbol.clone();
@@ -249,18 +342,27 @@ pub fn spawn_evaluation_tasks(
         let config = Arc::clone(&config);
         let persistence = persistence.clone();
         let market_history = Arc::clone(&market_history);
+        let liquidation_history = Arc::clone(&liquidation_history);
         let request = request.clone();
         let symbol = symbol.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(horizon_s)).await;
             let success_threshold_bps = config.symbol_success_threshold_bps(&symbol);
             let target_time_ms = request.event_time_ms + (horizon_s as i64) * 1000;
-            let outcome = {
+            let price_outcome = {
                 let history = market_history.lock().expect("market history lock poisoned");
                 history.evaluate_with_lookup(&request, horizon_s, success_threshold_bps)
             };
-            match outcome {
+            let mut liquidation_outcome = {
+                let history = liquidation_history
+                    .lock()
+                    .expect("liquidation history lock poisoned");
+                history.evaluate_window(&request, horizon_s)
+            };
+
+            match price_outcome {
                 Ok((lookup, outcome)) => {
+                    liquidation_outcome.price_success_flag = outcome.success_flag;
                     debug!(
                         event_id = %request.event_id,
                         symbol = %request.symbol,
@@ -273,13 +375,6 @@ pub fn spawn_evaluation_tasks(
                     );
                     if let Err(err) = persistence.send_outcome(outcome.clone()) {
                         warn!(error = %err, event_id = %outcome.event_id, "failed to persist outcome");
-                    } else {
-                        info!(
-                            event_id = %outcome.event_id,
-                            horizon_s = outcome.horizon_s,
-                            success_flag = outcome.success_flag,
-                            "outcome evaluated"
-                        );
                     }
                 }
                 Err(failure) => {
@@ -300,6 +395,40 @@ pub fn spawn_evaluation_tasks(
                     );
                 }
             }
+
+            debug!(
+                event_id = %request.event_id,
+                symbol = %request.symbol,
+                horizon_s,
+                expected_liq_side = liquidation_outcome.expected_liq_side.as_str(),
+                liq_success_flag = liquidation_outcome.liq_success_flag,
+                liq_event_count = liquidation_outcome.liq_event_count,
+                liq_qty_sum = liquidation_outcome.liq_qty_sum,
+                liq_max_qty = liquidation_outcome.liq_max_qty,
+                liq_first_seen_time_ms = liquidation_outcome.liq_first_seen_time_ms,
+                time_to_first_liq_ms = liquidation_outcome.time_to_first_liq_ms,
+                "liquidation outcome evaluated"
+            );
+            if let Err(err) = persistence.send_liquidation_outcome(liquidation_outcome.clone()) {
+                warn!(
+                    error = %err,
+                    event_id = %liquidation_outcome.event_id,
+                    "failed to persist liquidation outcome"
+                );
+            }
+
+            info!(
+                event_id = %request.event_id,
+                symbol = %request.symbol,
+                horizon_s,
+                price_success_flag = liquidation_outcome.price_success_flag,
+                liq_success_flag = liquidation_outcome.liq_success_flag,
+                liq_event_count = liquidation_outcome.liq_event_count,
+                liq_qty_sum = liquidation_outcome.liq_qty_sum,
+                liq_max_qty = liquidation_outcome.liq_max_qty,
+                expected_liq_side = liquidation_outcome.expected_liq_side.as_str(),
+                "outcome evaluated"
+            );
         });
     }
 }

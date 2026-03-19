@@ -171,6 +171,20 @@ pub struct OutcomeCheckEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiquidationOutcomeCheckEvent {
+    pub event_id: String,
+    pub horizon_s: u64,
+    pub expected_liq_side: Direction,
+    pub price_success_flag: bool,
+    pub liq_success_flag: bool,
+    pub liq_event_count: u64,
+    pub liq_qty_sum: f64,
+    pub liq_max_qty: f64,
+    pub liq_first_seen_time_ms: Option<i64>,
+    pub time_to_first_liq_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatEvent {
     pub service_time_ms: i64,
     pub status: String,

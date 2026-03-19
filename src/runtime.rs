@@ -11,7 +11,10 @@ use uuid::Uuid;
 
 use crate::{
     config::AppConfig,
-    evaluation::{EvaluationRequest, MarketHistory, SharedMarketHistory, spawn_evaluation_tasks},
+    evaluation::{
+        EvaluationRequest, LiquidationHistory, MarketHistory, SharedLiquidationHistory,
+        SharedMarketHistory, spawn_evaluation_tasks,
+    },
     features::{FeatureSnapshot, compute_features},
     persistence::PersistenceHandle,
     scoring::{compute_market_confirmation, compute_venue_scores},
@@ -145,6 +148,8 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<MarketEvent>(20_000);
     let _handles = sources::spawn_sources(&config, tx)?;
     let market_history: SharedMarketHistory = Arc::new(Mutex::new(MarketHistory::default()));
+    let liquidation_history: SharedLiquidationHistory =
+        Arc::new(Mutex::new(LiquidationHistory::default()));
     spawn_heartbeat_task(persistence.clone());
 
     let mut venue_states: HashMap<(String, Venue), RollingState> = HashMap::new();
@@ -167,6 +172,20 @@ pub async fn run(config: AppConfig) -> Result<()> {
 
     while let Some(event) = rx.recv().await {
         if let MarketEvent::Liquidation(tick) = event {
+            {
+                let mut history = liquidation_history
+                    .lock()
+                    .expect("liquidation history lock poisoned");
+                // Liquidation evaluation uses local receive time so it shares a clock domain
+                // with signal timestamps assigned from processed online data.
+                history.record(
+                    &tick.symbol,
+                    tick.side,
+                    tick.recv_time_ms,
+                    tick.quantity,
+                    tick.price,
+                );
+            }
             if let Err(err) = persistence.send_liquidation_event(tick.clone()) {
                 error!(
                     error = %err,
@@ -269,6 +288,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
                 &config,
                 &persistence,
                 &market_history,
+                &liquidation_history,
                 &mut signal_registry,
                 &mut block_counters,
                 &mut runtime_stats,
@@ -296,6 +316,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
                     &config,
                     &persistence,
                     &market_history,
+                    &liquidation_history,
                     &mut signal_registry,
                     &mut runtime_stats,
                     &symbol_snapshots,
@@ -325,6 +346,7 @@ fn emit_venue_signal_if_needed(
     config: &Arc<AppConfig>,
     persistence: &PersistenceHandle,
     market_history: &SharedMarketHistory,
+    liquidation_history: &SharedLiquidationHistory,
     signal_registry: &mut SignalRegistry,
     block_counters: &mut BlockCounters,
     runtime_stats: &mut RuntimeStats,
@@ -570,6 +592,7 @@ fn emit_venue_signal_if_needed(
             Arc::clone(config),
             persistence.clone(),
             Arc::clone(market_history),
+            Arc::clone(liquidation_history),
             EvaluationRequest {
                 event_id: event.event_id,
                 symbol: event.symbol,
@@ -585,6 +608,7 @@ fn emit_market_signal_if_needed(
     config: &Arc<AppConfig>,
     persistence: &PersistenceHandle,
     market_history: &SharedMarketHistory,
+    liquidation_history: &SharedLiquidationHistory,
     signal_registry: &mut SignalRegistry,
     runtime_stats: &mut RuntimeStats,
     symbol_snapshots: &[VenueScoreSnapshot],
@@ -679,6 +703,7 @@ fn emit_market_signal_if_needed(
                     Arc::clone(config),
                     persistence.clone(),
                     Arc::clone(market_history),
+                    Arc::clone(liquidation_history),
                     EvaluationRequest {
                         event_id: event.event_id,
                         symbol: event.symbol,

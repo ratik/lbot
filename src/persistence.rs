@@ -10,7 +10,8 @@ use rusqlite::{Connection, params};
 use tracing::error;
 
 use crate::types::{
-    HeartbeatEvent, LiquidationTick, MarketSignalEvent, OutcomeCheckEvent, VenueSignalEvent,
+    HeartbeatEvent, LiquidationOutcomeCheckEvent, LiquidationTick, MarketSignalEvent,
+    OutcomeCheckEvent, VenueSignalEvent,
 };
 
 #[derive(Debug)]
@@ -19,6 +20,7 @@ enum PersistCommand {
     MarketSignal(MarketSignalEvent),
     Liquidation(LiquidationTick),
     Outcome(OutcomeCheckEvent),
+    LiquidationOutcome(LiquidationOutcomeCheckEvent),
     Heartbeat(HeartbeatEvent),
 }
 
@@ -71,6 +73,12 @@ impl PersistenceHandle {
             .context("outcome send failed")
     }
 
+    pub fn send_liquidation_outcome(&self, event: LiquidationOutcomeCheckEvent) -> Result<()> {
+        self.tx
+            .send(PersistCommand::LiquidationOutcome(event))
+            .context("liquidation outcome send failed")
+    }
+
     pub fn send_heartbeat(&self, event: HeartbeatEvent) -> Result<()> {
         self.tx
             .send(PersistCommand::Heartbeat(event))
@@ -90,6 +98,7 @@ fn run_worker(path: &str, rx: Receiver<PersistCommand>) -> Result<()> {
             PersistCommand::MarketSignal(event) => insert_market_signal(&conn, &event)?,
             PersistCommand::Liquidation(event) => insert_liquidation_event(&conn, &event)?,
             PersistCommand::Outcome(event) => insert_outcome(&conn, &event)?,
+            PersistCommand::LiquidationOutcome(event) => insert_liquidation_outcome(&conn, &event)?,
             PersistCommand::Heartbeat(event) => insert_heartbeat(&conn, &event)?,
         }
     }
@@ -151,6 +160,20 @@ fn init_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_liquidation_events_venue_symbol_time
             ON liquidation_events(venue, symbol, event_time_ms);
+
+        CREATE TABLE IF NOT EXISTS liquidation_outcome_checks (
+            event_id TEXT NOT NULL,
+            horizon_s INTEGER NOT NULL,
+            expected_liq_side TEXT NOT NULL,
+            price_success_flag INTEGER NOT NULL,
+            liq_success_flag INTEGER NOT NULL,
+            liq_event_count INTEGER NOT NULL,
+            liq_qty_sum REAL NOT NULL,
+            liq_max_qty REAL NOT NULL,
+            liq_first_seen_time_ms INTEGER,
+            time_to_first_liq_ms INTEGER,
+            PRIMARY KEY (event_id, horizon_s)
+        );
 
         CREATE TABLE IF NOT EXISTS service_heartbeats (
             service_time INTEGER NOT NULL,
@@ -234,6 +257,30 @@ fn insert_liquidation_event(conn: &Connection, event: &LiquidationTick) -> Resul
             event.side.as_str(),
             event.price,
             event.quantity,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_liquidation_outcome(
+    conn: &Connection,
+    event: &LiquidationOutcomeCheckEvent,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO liquidation_outcome_checks
+        (event_id, horizon_s, expected_liq_side, price_success_flag, liq_success_flag, liq_event_count, liq_qty_sum, liq_max_qty, liq_first_seen_time_ms, time_to_first_liq_ms)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            event.event_id,
+            event.horizon_s as i64,
+            event.expected_liq_side.as_str(),
+            event.price_success_flag as i64,
+            event.liq_success_flag as i64,
+            event.liq_event_count as i64,
+            event.liq_qty_sum,
+            event.liq_max_qty,
+            event.liq_first_seen_time_ms,
+            event.time_to_first_liq_ms,
         ],
     )?;
     Ok(())
